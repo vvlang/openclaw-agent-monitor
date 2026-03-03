@@ -2,10 +2,13 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>OpenClaw 全量 Agent 监控</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        html { -webkit-text-size-adjust: 100%; }
         body { font-family: 'Inter', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
         .status-dot { transition: all 0.3s ease; }
         .status-idle { background-color: #22c55e; box-shadow: 0 0 10px #22c55e; }
@@ -26,38 +29,52 @@
         .sys-online { color: #22c55e; }
         .sys-offline { color: #64748b; }
         #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+        .scroll-touch { -webkit-overflow-scrolling: touch; }
+        .tap-target { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+        #raw-json-panel.raw-json-collapsed { width: 100%; }
+        @media (min-width: 768px) {
+            #raw-json-panel.raw-json-collapsed { width: 2.5rem; min-width: 2.5rem; }
+            #raw-json-panel.raw-json-collapsed #raw-json-toggle .raw-json-text { display: none; }
+            #raw-json-panel.raw-json-collapsed #raw-json-collapsed-icon { display: flex !important; }
+        }
+        @media (max-width: 768px) {
+            body { min-height: 100vh; min-height: 100dvh; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+            .safe-area-padding { padding-left: env(safe-area-inset-left, 0); padding-right: env(safe-area-inset-right, 0); padding-top: env(safe-area-inset-top, 0); }
+            #agents-container { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 0.5rem; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.25rem; }
+            .agent-card { min-width: 0; padding: 0.5rem; }
+        }
     </style>
 </head>
-<body class="h-screen flex flex-col overflow-hidden">
+<body class="min-h-screen overflow-y-auto md:h-screen md:overflow-hidden flex flex-col">
 
-    <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 shadow-lg z-10 shrink-0">
-        <div class="flex justify-between items-center mb-4">
-            <div>
-                <h1 class="text-xl font-bold text-white tracking-wider">OpenClaw 全量 Agent 监控</h1>
-                <p class="text-xs text-slate-400 mt-0.5">监控当前配置中的全部 Agent · Gateway · 通道 · 会话</p>
+    <header class="bg-slate-800 border-b border-slate-700 px-3 py-3 md:px-6 md:py-4 shadow-lg z-10 shrink-0 safe-area-padding">
+        <div class="flex flex-col gap-3 md:flex-row md:justify-between md:items-center md:mb-4">
+            <div class="min-w-0">
+                <h1 class="text-base md:text-xl font-bold text-white tracking-wider truncate">OpenClaw 全量 Agent 监控</h1>
+                <p class="text-[10px] md:text-xs text-slate-400 mt-0.5 hidden sm:block">监控当前配置中的全部 Agent · Gateway · 通道 · 会话</p>
             </div>
-            <div class="flex items-center gap-6 flex-wrap justify-end">
-                <div id="system-info" class="flex items-center gap-4 text-xs font-mono text-slate-400 flex-wrap">
+            <div class="flex items-center gap-2 md:gap-6 flex-wrap text-[10px] md:text-xs">
+                <div id="system-info" class="flex items-center gap-2 md:gap-4 font-mono text-slate-400 flex-wrap">
                     <span id="sys-cpu" title="CPU 使用率">--</span>
                     <span id="sys-mem" title="内存使用率">--</span>
                     <span id="sys-disk" title="磁盘使用率">--</span>
                     <span id="sys-ip" title="本机 IP">--</span>
                     <span id="sys-net" title="外网状态">--</span>
                 </div>
-                <div id="gateway-badge" class="text-xs font-mono px-2 py-1 rounded bg-slate-700/80">--</div>
+                <div id="gateway-badge" class="font-mono px-2 py-1 rounded bg-slate-700/80">--</div>
                 <div>
-                    <div id="global-status" class="text-xs font-mono text-slate-400">等待数据...</div>
+                    <div id="global-status" class="font-mono text-slate-400">等待数据...</div>
                     <div id="last-update" class="text-[10px] text-slate-600 mt-0.5">--:--:--</div>
                 </div>
             </div>
         </div>
 
-        <div id="gateway-row" class="flex flex-wrap gap-4 items-center text-xs mb-4 hidden">
+        <div id="gateway-row" class="flex flex-wrap gap-2 md:gap-4 items-center text-[10px] md:text-xs mt-2 md:mb-4 hidden">
             <span id="gateway-detail" class="text-slate-400"></span>
-            <span id="channels-summary" class="text-slate-500"></span>
+            <span id="channels-summary" class="text-slate-500 truncate max-w-full"></span>
         </div>
 
-        <div id="agents-container" class="gap-3">
+        <div id="agents-container" class="gap-3 mt-2">
             <div class="col-span-full text-center py-6 text-slate-500">
                 <div class="inline-block animate-spin mr-2">⟳</div>
                 正在连接监控服务...
@@ -65,34 +82,40 @@
         </div>
     </header>
 
-    <main class="flex-1 overflow-hidden flex min-h-0">
-        <div class="flex-1 min-h-0 p-4 overflow-y-auto bg-slate-900/50 flex flex-col">
-            <div class="flex justify-between items-center mb-3 shrink-0">
-                <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">状态变化日志</h2>
-                <button onclick="clearLogs()" class="text-xs text-slate-500 hover:text-white">清空</button>
+    <main class="flex-1 min-h-0 flex flex-col md:flex-row md:overflow-hidden overflow-y-auto overflow-x-hidden scroll-touch">
+        <div class="flex-1 min-w-0 p-3 md:p-4 bg-slate-900/50 flex flex-col md:min-h-0 md:overflow-y-auto md:overflow-x-hidden">
+            <div class="flex justify-between items-center mb-2 md:mb-3 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider">状态变化日志</h2>
+                <button type="button" onclick="clearLogs()" class="tap-target text-xs text-slate-500 hover:text-white active:bg-slate-700/50 rounded px-2">清空</button>
             </div>
-            <div id="log-stream" class="space-y-1.5 font-mono text-xs flex-1 min-h-[10rem] overflow-y-auto overflow-x-hidden rounded border border-slate-700/50 bg-slate-800/30 p-2 shrink-0">
+            <div id="log-stream" class="space-y-1.5 font-mono text-[10px] md:text-xs min-h-[6rem] md:min-h-[10rem] md:flex-1 md:min-h-0 overflow-y-auto overflow-x-hidden rounded border border-slate-700/50 bg-slate-800/30 p-2 shrink-0 scroll-touch">
                 <div id="log-placeholder" class="text-slate-600 italic">等待事件...</div>
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
-                <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">最近会话</h2>
-                <div id="recent-sessions" class="space-y-1 font-mono text-[10px] text-slate-400 max-h-32 overflow-y-auto">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">最近会话</h2>
+                <div id="recent-sessions" class="space-y-1 font-mono text-[10px] text-slate-400 max-h-28 md:max-h-32 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic">无数据</div>
                 </div>
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
-                <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">会话内容预览</h2>
-                <div id="session-content" class="space-y-3 max-h-64 overflow-y-auto">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">会话内容预览</h2>
+                <div id="session-content" class="space-y-3 max-h-48 md:max-h-64 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic text-xs">无内容（writer 会为最近会话读取 .jsonl 预览）</div>
                 </div>
             </div>
         </div>
 
-        <div class="w-72 bg-slate-950 border-l border-slate-800 p-3 overflow-y-auto text-[10px] text-slate-400 font-mono shrink-0">
-            <h3 class="text-slate-500 font-bold mb-2 sticky top-0 bg-slate-950 pb-1">原始 JSON</h3>
-            <pre id="raw-json" class="whitespace-pre-wrap break-all opacity-80">等待数据...</pre>
+        <div id="raw-json-panel" class="w-full md:w-72 bg-slate-950 border-t md:border-t-0 md:border-l border-slate-800 shrink-0 flex flex-col min-h-0">
+            <button type="button" id="raw-json-toggle" class="relative sticky top-0 z-10 flex items-center justify-between w-full gap-2 py-2 px-3 bg-slate-950 border-b border-slate-800 text-left tap-target hover:bg-slate-900 active:bg-slate-800 md:min-w-0">
+                <span class="raw-json-text text-slate-500 font-bold text-[10px] md:text-xs truncate">原始 JSON</span>
+                <span id="raw-json-toggle-label" class="raw-json-text text-slate-500 text-[10px] shrink-0">折叠</span>
+                <span id="raw-json-collapsed-icon" class="hidden text-slate-500 text-sm absolute inset-0 flex items-center justify-center pointer-events-none">»</span>
+            </button>
+            <div id="raw-json-body" class="flex-1 min-h-0 p-3 overflow-x-auto overflow-y-auto text-[10px] text-slate-400 font-mono scroll-touch">
+                <pre id="raw-json" class="whitespace-pre-wrap break-all opacity-80 min-w-0">等待数据...</pre>
+            </div>
         </div>
     </main>
 
@@ -329,6 +352,25 @@
                 gatewayBadge.textContent = '--';
             }
         }
+
+        (function initRawJsonToggle() {
+            var body = document.getElementById('raw-json-body');
+            var label = document.getElementById('raw-json-toggle-label');
+            var key = 'openclaw-monitor-raw-json-open';
+            var isOpen = true;
+            try { isOpen = localStorage.getItem(key) !== 'false'; } catch (e) {}
+            function update() {
+                body.classList.toggle('hidden', !isOpen);
+                label.textContent = isOpen ? '折叠' : '展开';
+                document.getElementById('raw-json-panel').classList.toggle('raw-json-collapsed', !isOpen);
+                try { localStorage.setItem(key, isOpen); } catch (e) {}
+            }
+            update();
+            document.getElementById('raw-json-toggle').addEventListener('click', function () {
+                isOpen = !isOpen;
+                update();
+            });
+        })();
 
         setInterval(fetchData, 2000);
         fetchData();
