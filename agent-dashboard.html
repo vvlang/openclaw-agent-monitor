@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw 全量 Agent 监控</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
+        .status-dot { transition: all 0.3s ease; }
+        .status-idle { background-color: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        .status-thinking { background-color: #3b82f6; animation: pulse 1s infinite; }
+        .status-error { background-color: #ef4444; animation: ping 1s infinite; }
+        .status-checking { background-color: #f59e0b; animation: spin 1s linear infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); } 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); } }
+        @keyframes ping { 0% { transform: scale(1); opacity: 1; } 75% { transform: scale(1.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .agent-card { background: rgba(30, 41, 59, 0.6); border: 1px solid #334155; transition: all 0.3s; backdrop-filter: blur(4px); }
+        .agent-card:hover { border-color: #475569; background: rgba(30, 41, 59, 0.9); transform: translateY(-2px); }
+        .agent-card.thinking { border-color: #3b82f6; box-shadow: 0 0 15px rgba(59, 130, 246, 0.3); }
+        .gateway-ok { color: #22c55e; }
+        .gateway-fail { color: #ef4444; }
+        .sys-ok { color: #94a3b8; }
+        .sys-warn { color: #f59e0b; }
+        .sys-high { color: #ef4444; }
+        .sys-online { color: #22c55e; }
+        .sys-offline { color: #64748b; }
+        #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <header class="bg-slate-800 border-b border-slate-700 px-6 py-4 shadow-lg z-10 shrink-0">
+        <div class="flex justify-between items-center mb-4">
+            <div>
+                <h1 class="text-xl font-bold text-white tracking-wider">OpenClaw 全量 Agent 监控</h1>
+                <p class="text-xs text-slate-400 mt-0.5">监控当前配置中的全部 Agent · Gateway · 通道 · 会话</p>
+            </div>
+            <div class="flex items-center gap-6 flex-wrap justify-end">
+                <div id="system-info" class="flex items-center gap-4 text-xs font-mono text-slate-400 flex-wrap">
+                    <span id="sys-cpu" title="CPU 使用率">--</span>
+                    <span id="sys-mem" title="内存使用率">--</span>
+                    <span id="sys-disk" title="磁盘使用率">--</span>
+                    <span id="sys-ip" title="本机 IP">--</span>
+                    <span id="sys-net" title="外网状态">--</span>
+                </div>
+                <div id="gateway-badge" class="text-xs font-mono px-2 py-1 rounded bg-slate-700/80">--</div>
+                <div>
+                    <div id="global-status" class="text-xs font-mono text-slate-400">等待数据...</div>
+                    <div id="last-update" class="text-[10px] text-slate-600 mt-0.5">--:--:--</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="gateway-row" class="flex flex-wrap gap-4 items-center text-xs mb-4 hidden">
+            <span id="gateway-detail" class="text-slate-400"></span>
+            <span id="channels-summary" class="text-slate-500"></span>
+        </div>
+
+        <div id="agents-container" class="gap-3">
+            <div class="col-span-full text-center py-6 text-slate-500">
+                <div class="inline-block animate-spin mr-2">⟳</div>
+                正在连接监控服务...
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 overflow-hidden flex min-h-0">
+        <div class="flex-1 min-h-0 p-4 overflow-y-auto bg-slate-900/50 flex flex-col">
+            <div class="flex justify-between items-center mb-3 shrink-0">
+                <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">状态变化日志</h2>
+                <button onclick="clearLogs()" class="text-xs text-slate-500 hover:text-white">清空</button>
+            </div>
+            <div id="log-stream" class="space-y-1.5 font-mono text-xs flex-1 min-h-[10rem] overflow-y-auto overflow-x-hidden rounded border border-slate-700/50 bg-slate-800/30 p-2 shrink-0">
+                <div id="log-placeholder" class="text-slate-600 italic">等待事件...</div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">最近会话</h2>
+                <div id="recent-sessions" class="space-y-1 font-mono text-[10px] text-slate-400 max-h-32 overflow-y-auto">
+                    <div class="text-slate-600 italic">无数据</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">会话内容预览</h2>
+                <div id="session-content" class="space-y-3 max-h-64 overflow-y-auto">
+                    <div class="text-slate-600 italic text-xs">无内容（writer 会为最近会话读取 .jsonl 预览）</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="w-72 bg-slate-950 border-l border-slate-800 p-3 overflow-y-auto text-[10px] text-slate-400 font-mono shrink-0">
+            <h3 class="text-slate-500 font-bold mb-2 sticky top-0 bg-slate-950 pb-1">原始 JSON</h3>
+            <pre id="raw-json" class="whitespace-pre-wrap break-all opacity-80">等待数据...</pre>
+        </div>
+    </main>
+
+    <script>
+        const DATA_FILE = 'agent-status.json';
+        const agentsContainer = document.getElementById('agents-container');
+        const logStream = document.getElementById('log-stream');
+        const rawJsonEl = document.getElementById('raw-json');
+        const globalStatus = document.getElementById('global-status');
+        const lastUpdateEl = document.getElementById('last-update');
+        const gatewayBadge = document.getElementById('gateway-badge');
+        const gatewayRow = document.getElementById('gateway-row');
+        const gatewayDetail = document.getElementById('gateway-detail');
+        const channelsSummary = document.getElementById('channels-summary');
+        const recentSessionsEl = document.getElementById('recent-sessions');
+        const sessionContentEl = document.getElementById('session-content');
+
+        let previousState = {};
+
+        function pctClass(pct) {
+            if (pct == null) return 'sys-ok';
+            if (pct >= 90) return 'sys-high';
+            if (pct >= 70) return 'sys-warn';
+            return 'sys-ok';
+        }
+
+        function renderSystemInfo(data) {
+            var sys = data.system;
+            var cpuEl = document.getElementById('sys-cpu');
+            var memEl = document.getElementById('sys-mem');
+            var diskEl = document.getElementById('sys-disk');
+            var ipEl = document.getElementById('sys-ip');
+            var netEl = document.getElementById('sys-net');
+            if (!sys) {
+                if (cpuEl) cpuEl.textContent = 'CPU --';
+                if (memEl) memEl.textContent = '内存 --';
+                if (diskEl) diskEl.textContent = '磁盘 --';
+                if (ipEl) ipEl.textContent = 'IP --';
+                if (netEl) netEl.textContent = '网络 --';
+                return;
+            }
+            if (cpuEl) {
+                cpuEl.textContent = 'CPU ' + (sys.cpu != null ? sys.cpu + '%' : '--');
+                cpuEl.className = 'font-mono ' + pctClass(sys.cpu);
+            }
+            if (memEl && sys.memory) {
+                memEl.textContent = '内存 ' + (sys.memory.usedPct != null ? sys.memory.usedPct + '%' : '--');
+                memEl.className = 'font-mono ' + pctClass(sys.memory.usedPct);
+            }
+            if (diskEl) {
+                diskEl.textContent = '磁盘 ' + (sys.disk != null ? sys.disk + '%' : '--');
+                diskEl.className = 'font-mono ' + pctClass(sys.disk);
+            }
+            if (ipEl) {
+                ipEl.textContent = sys.ip || '--';
+                ipEl.className = 'font-mono text-slate-300';
+            }
+            if (netEl) {
+                netEl.textContent = sys.network || '--';
+                netEl.className = 'font-mono ' + (sys.network === '在线' ? 'sys-online' : 'sys-offline');
+            }
+        }
+
+        function getStatusText(status) {
+            const map = { checking: '初始化...', idle: '空闲', thinking: '工作中', error: '异常' };
+            return map[status] || status;
+        }
+
+        function getStatusClass(status) {
+            return `status-${status}`;
+        }
+
+        function formatAge(ageMs) {
+            if (ageMs == null) return '--';
+            const s = Math.floor(ageMs / 1000);
+            if (s < 60) return s + 's';
+            const m = Math.floor(s / 60);
+            if (m < 60) return m + 'm';
+            return Math.floor(m / 60) + 'h';
+        }
+
+        function renderGateway(data) {
+            const gw = data.gateway;
+            if (!gw) {
+                gatewayRow.classList.add('hidden');
+                return;
+            }
+            gatewayRow.classList.remove('hidden');
+            if (gw.reachable) {
+                gatewayBadge.textContent = 'Gateway 在线';
+                gatewayBadge.className = 'text-xs font-mono px-2 py-1 rounded gateway-ok bg-green-900/30';
+                gatewayDetail.textContent = [
+                    gw.version && 'v' + gw.version,
+                    gw.latencyMs != null && gw.latencyMs + 'ms',
+                    gw.host && gw.host
+                ].filter(Boolean).join(' · ');
+            } else {
+                gatewayBadge.textContent = 'Gateway 离线';
+                gatewayBadge.className = 'text-xs font-mono px-2 py-1 rounded gateway-fail bg-red-900/30';
+                gatewayDetail.textContent = gw.error || '不可达';
+            }
+            if (Array.isArray(data.channels) && data.channels.length) {
+                channelsSummary.textContent = data.channels.slice(0, 4).join(' | ');
+            } else {
+                channelsSummary.textContent = '';
+            }
+        }
+
+        function renderRecentSessions(data) {
+            var list = data.recentSessions;
+            if (!list || !list.length) {
+                recentSessionsEl.innerHTML = '<div class="text-slate-600 italic">无最近会话</div>';
+                return;
+            }
+            recentSessionsEl.innerHTML = list.slice(0, 20).map(function (s) {
+                var age = s.age != null ? formatAge(s.age) : '--';
+                var pct = s.percentUsed != null ? s.percentUsed + '%' : '';
+                return '<div class="flex justify-between gap-2 py-0.5 border-b border-slate-800/50">' +
+                    '<span class="truncate">' + escapeHtml(s.agentId) + '</span>' +
+                    '<span>' + age + '</span>' +
+                    '<span>' + pct + '</span>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function renderSessionContent(data) {
+            var list = data.recentSessions || [];
+            var withContent = list.filter(function (s) { return s.contentPreview && s.contentPreview.length; });
+            if (!withContent.length) {
+                sessionContentEl.innerHTML = '<div class="text-slate-600 italic text-xs">暂无会话内容预览</div>';
+                return;
+            }
+            sessionContentEl.innerHTML = withContent.map(function (s) {
+                var age = s.age != null ? formatAge(s.age) : '--';
+                var sid = (s.sessionId || '').slice(0, 8);
+                var preview = (s.contentPreview || []).slice();
+                var lines = preview.map(function (m, i) {
+                    var roleLabel = m.role === 'user' ? '用户' : '助手';
+                    var cls = m.role === 'user' ? 'text-amber-200 border-amber-900/50' : 'text-sky-200 border-sky-900/50';
+                    var latestTag = i === 0 ? ' <span class="text-slate-500 text-[10px]">(最新)</span>' : '';
+                    return '<div class="border-l-2 pl-2 py-0.5 text-xs ' + cls + ' bg-slate-800/40 rounded mb-1">' +
+                        '<span class="text-slate-500 font-mono">' + escapeHtml(roleLabel) + '</span>' + latestTag + ' ' +
+                        escapeHtml(m.text) + '</div>';
+                }).join('');
+                return '<div class="rounded-lg border border-slate-700 bg-slate-800/50 p-2">' +
+                    '<div class="flex justify-between items-center mb-1.5 text-[10px] text-slate-500">' +
+                    '<span>' + escapeHtml(s.agentId) + '</span>' +
+                    '<span>' + sid + '… · ' + age + '</span>' +
+                    '</div>' +
+                    '<div class="space-y-0.5">' + lines + '</div>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function escapeHtml(s) {
+            if (s == null) return '';
+            var div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
+        function renderAgents(data) {
+            var agents = data.agents || [];
+            if (agents.length === 0) {
+                agentsContainer.innerHTML = '<div class="col-span-full text-center py-6 text-slate-500">暂无 Agent（请运行 agent-status-writer.js 并确保 OpenClaw 已配置 Agent）</div>';
+            } else {
+                agentsContainer.innerHTML = '';
+                agents.forEach(function (agent) {
+                    var statusClass = getStatusClass(agent.status);
+                    var isThinking = agent.status === 'thinking';
+                    var card = document.createElement('div');
+                    card.className = 'agent-card rounded-xl p-3 flex flex-col items-center justify-center gap-2 relative overflow-hidden' + (isThinking ? ' thinking' : '');
+                    card.innerHTML =
+                        '<div class="absolute top-0 left-0 w-full h-1 ' + (agent.color || 'bg-gray-500') + '"></div>' +
+                        '<div class="w-4 h-4 rounded-full status-dot ' + statusClass + '"></div>' +
+                        '<div class="text-center">' +
+                        '<div class="text-sm font-bold text-white leading-tight">' + escapeHtml(agent.name) + '</div>' +
+                        '<div class="text-[10px] text-slate-400 font-mono uppercase">' + escapeHtml(agent.id) + '</div>' +
+                        '</div>' +
+                        '<div class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
+                        (agent.sessionCount != null && agent.sessionCount > 0 ? '<div class="text-[10px] text-slate-500">' + agent.sessionCount + ' 会话</div>' : '') +
+                        (agent.percentUsed != null ? '<div class="text-[10px] text-slate-500">上下文 ' + agent.percentUsed + '%</div>' : '') +
+                        (agent.message ? '<div class="text-[10px] text-slate-500 truncate max-w-full text-center px-1">' + escapeHtml(agent.message) + '</div>' : '');
+                    agentsContainer.appendChild(card);
+                });
+            }
+
+            rawJsonEl.textContent = JSON.stringify(data, null, 2);
+            lastUpdateEl.textContent = data.lastUpdated ? '更新：' + new Date(data.lastUpdated).toLocaleTimeString() : '--';
+            globalStatus.textContent = agents.length + ' 个 Agent';
+            globalStatus.className = 'text-xs font-mono text-green-400';
+
+            renderGateway(data);
+            renderRecentSessions(data);
+            renderSessionContent(data);
+            renderSystemInfo(data);
+        }
+
+        function addLog(message, type) {
+            var placeholder = document.getElementById('log-placeholder');
+            if (placeholder && placeholder.parentNode) placeholder.remove();
+            type = type || 'info';
+            var colors = { info: 'text-blue-300 border-blue-900/50', success: 'text-green-300 border-green-900/50', error: 'text-red-300 border-red-900/50', warning: 'text-yellow-300 border-yellow-900/50' };
+            var div = document.createElement('div');
+            div.className = (colors[type] || colors.info) + ' border-l-2 pl-2 py-0.5 bg-slate-800/50 rounded break-words';
+            div.innerHTML = '<span class="text-slate-500">[' + new Date().toLocaleTimeString() + ']</span> ' + escapeHtml(message);
+            logStream.insertBefore(div, logStream.firstChild);
+            while (logStream.children.length > 50) logStream.removeChild(logStream.lastChild);
+        }
+
+        function clearLogs() {
+            logStream.innerHTML = '<div id="log-placeholder" class="text-slate-600 italic">日志已清空</div>';
+        }
+
+        async function fetchData() {
+            try {
+                var response = await fetch(DATA_FILE + '?t=' + Date.now());
+                if (!response.ok) throw new Error('No data');
+                var data = await response.json();
+                renderAgents(data);
+
+                (data.agents || []).forEach(function (agent) {
+                    var prev = previousState[agent.id];
+                    if (prev !== agent.status) {
+                        if (agent.status === 'thinking' && prev === 'idle') addLog('[' + agent.name + '] 开始工作', 'success');
+                        else if (agent.status === 'idle' && prev === 'thinking') addLog('[' + agent.name + '] 空闲', 'info');
+                        else if (agent.status === 'error') addLog('[' + agent.name + '] 异常', 'error');
+                    }
+                    previousState[agent.id] = agent.status;
+                });
+            } catch (e) {
+                globalStatus.textContent = '未连接';
+                globalStatus.className = 'text-xs font-mono text-red-400';
+                gatewayBadge.textContent = '--';
+            }
+        }
+
+        setInterval(fetchData, 2000);
+        fetchData();
+        addLog('监控已启动，将显示 OpenClaw 中全部 Agent', 'info');
+    </script>
+</body>
+</html>
