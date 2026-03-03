@@ -92,22 +92,7 @@ npx -y serve -p 3880
 
 浏览器访问：**http://localhost:3880/agent-dashboard.html**
 
-### 3. 通过「START 启动面板」统一启动（可选）
 
-若使用 START 应用管理器等启动面板：
-
-- 将本仓库放入面板配置的目录（例如 `START启动面板`）。
-- 在面板的 `apps_config.json` 中增加一项，例如：
-
-```json
-{
-  "name": "OpenClaw Agent 监控",
-  "directory": "/path/to/openclaw-agent-monitor",
-  "command": "./start.sh",
-  "description": "OpenClaw 全量 Agent 状态与会话内容监控",
-  "web_url": "http://本机IP:3880/agent-dashboard.html"
-}
-```
 
 - 本仓库若自带 `start.sh`，其逻辑一般为：后台启动 `node agent-status-writer.js`，前台执行 `npx -y serve -p 3880`；停止面板应用时会一并结束 writer 与 HTTP 服务。
 
