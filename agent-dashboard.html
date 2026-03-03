@@ -310,7 +310,7 @@
                         '<div class="absolute top-0 left-0 w-full h-1 ' + (agent.color || 'bg-gray-500') + '"></div>' +
                         '<div class="w-4 h-4 rounded-full status-dot ' + statusClass + '"></div>' +
                         '<div class="text-center">' +
-                        '<div class="text-sm font-bold text-white leading-tight">' + escapeHtml(agent.name) + '</div>' +
+                        '<div class="text-sm font-bold text-white leading-tight">' + escapeHtml(agent.name || agent.id || '未知 Agent') + '</div>' +
                         '<div class="text-[10px] text-slate-400 font-mono uppercase">' + escapeHtml(agent.id) + '</div>' +
                         '</div>' +
                         '<div class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
@@ -358,9 +358,10 @@
                 (data.agents || []).forEach(function (agent) {
                     var prev = previousState[agent.id];
                     if (prev !== agent.status) {
-                        if (agent.status === 'thinking' && prev === 'idle') addLog('[' + agent.name + '] 开始工作', 'success');
-                        else if (agent.status === 'idle' && prev === 'thinking') addLog('[' + agent.name + '] 空闲', 'info');
-                        else if (agent.status === 'error') addLog('[' + agent.name + '] 异常', 'error');
+                        var agentLabel = agent.name || agent.id || '未知 Agent';
+                        if (agent.status === 'thinking' && prev === 'idle') addLog('[' + agentLabel + '] 开始工作', 'success');
+                        else if (agent.status === 'idle' && prev === 'thinking') addLog('[' + agentLabel + '] 空闲', 'info');
+                        else if (agent.status === 'error') addLog('[' + agentLabel + '] 异常', 'error');
                     }
                     previousState[agent.id] = agent.status;
                 });

@@ -120,14 +120,15 @@ function getSystemInfo() {
   } catch (_) {}
   try {
     if (os.platform() === 'darwin') {
-      const out = execSync('top -l 1 -n 0 2>/dev/null', { encoding: 'utf-8', maxBuffer: 8192 });
+      const out = execSync('top -l 1 -n 0 2>/dev/null', { encoding: 'utf-8', maxBuffer: 8192, timeout: 5000 });
       const m = out.match(/([\d.]+)\s*%\s*idle/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1]));
     } else if (os.platform() === 'linux') {
-      const out = execSync("top -b -n 1 2>/dev/null | grep '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096 });
+      const out = execSync("top -b -n 1 2>/dev/null | grep '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096, timeout: 5000 });
       const m = out.match(/([\d.]+)\s*%\s*id(?:le)?\b|([\d.]+)\s+id\b/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1] || m[2]));
     }
+    // top 失败时用 loadavg 估算 CPU（非实测值，仅作回退）
     if (info.cpu == null && os.loadavg()[0] != null) {
       const load = os.loadavg()[0];
       const cpus = os.cpus().length;
@@ -135,7 +136,7 @@ function getSystemInfo() {
     }
   } catch (_) {}
   try {
-    const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096 });
+    const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096, timeout: 5000 });
     const lines = out.trim().split('\n').filter(Boolean);
     const dataLine = lines[lines.length - 1]; // 最后一行是当前目录/根分区数据
     const pct = dataLine.match(/(\d+)%/); // Capacity 列如 "22%" 或 "69% /"，不要求行尾
@@ -144,7 +145,7 @@ function getSystemInfo() {
   try {
     if (info.ip) {
       const pingCmd = os.platform() === 'darwin' ? 'ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
-      execSync(pingCmd, { encoding: 'utf-8' });
+      execSync(pingCmd, { encoding: 'utf-8', timeout: 5000 });
       info.network = '在线';
     } else {
       info.network = '无外网 IP';
@@ -160,6 +161,7 @@ function getStatusJson() {
     const raw = execSync('openclaw status --json 2>/dev/null', {
       encoding: 'utf-8',
       maxBuffer: 2 * 1024 * 1024,
+      timeout: 5000,
     });
     const start = raw.indexOf('{');
     if (start === -1) return null;
