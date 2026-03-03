@@ -1,6 +1,7 @@
 # OpenClaw Agent 监控
 
 基于 [OpenClaw](https://github.com/openclaw/openclaw) 的全量 Agent 状态与会话内容可视化监控。通过轮询 `openclaw status --json` 与会话 `.jsonl` 文件，在单一仪表盘中展示所有 Agent、Gateway、系统资源与最近对话预览。
+![图片alt](dome.png "demo")
 
 ---
 
