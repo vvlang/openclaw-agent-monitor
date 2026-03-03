@@ -111,14 +111,18 @@ function getSystemInfo() {
   try {
     if (os.platform() === 'darwin') {
       const out = execSync('top -l 1 -n 0 2>/dev/null', { encoding: 'utf-8', maxBuffer: 8192 });
-      const m = out.match(/CPU usage:\s*[\d.]+\s*%\s*user,\s*[\d.]+\s*%\s*sys,\s*[\d.]+\s*%\s*ni,\s*([\d.]+)\s*%\s*id/);
+      const m = out.match(/([\d.]+)\s*%\s*idle/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1]));
     } else if (os.platform() === 'linux') {
-      const out = execSync("top -b -n 1 2>/dev/null | grep -E '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096 });
-      const m = out.match(/([\d.]+)\s+id/);
-      if (m) info.cpu = Math.round(100 - parseFloat(m[1]));
+      const out = execSync("top -b -n 1 2>/dev/null | grep '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096 });
+      const m = out.match(/([\d.]+)\s*%\s*id(?:le)?\b|([\d.]+)\s+id\b/);
+      if (m) info.cpu = Math.round(100 - parseFloat(m[1] || m[2]));
     }
-    if (info.cpu == null) info.cpu = os.loadavg() ? Math.round(os.loadavg()[0] * 25) : null;
+    if (info.cpu == null && os.loadavg()[0] != null) {
+      const load = os.loadavg()[0];
+      const cpus = os.cpus().length;
+      info.cpu = Math.min(100, Math.round((load / Math.max(1, cpus)) * 100));
+    }
   } catch (_) {}
   try {
     const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096 });
