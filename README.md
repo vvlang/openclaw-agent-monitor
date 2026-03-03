@@ -49,7 +49,6 @@
 |------|------|
 | **agent-status-writer.js** | 状态写入器。轮询 `openclaw status --json`，采集 Agent、Gateway、通道、系统信息；为最近 N 个会话读取对应 `.jsonl` 最后几条 user/assistant 消息，写入 `agent-status.json`。 |
 | **agent-dashboard.html** | 单页仪表盘。展示 Agent 卡片、Gateway、系统信息、状态变化日志、最近会话、会话内容预览、原始 JSON 面板。 |
-| **log-tailer.js** | 可选。监听**单个** session 的 `.jsonl`，实时解析新行并更新状态；适合单 Agent、单会话的「思考/工具调用」流，与当前全量监控方案独立。 |
 | **STATUS_ANALYSIS.md** | 目录与数据源分析、设计说明。 |
 | **.gitignore** | 忽略 `agent-status.json`、`.DS_Store`，避免将运行时数据与系统文件提交到仓库。 |
 

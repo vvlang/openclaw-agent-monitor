@@ -45,9 +45,19 @@ function extractTextFromContent(content) {
     .trim();
 }
 
+const SESSION_JSONL_MAX_SIZE = 50 * 1024 * 1024; // 50MB，超过则跳过读取以保护性能
+
 /** 读取会话 .jsonl 中真正的最后几条 user/assistant 文本消息（从文件末尾往前扫） */
 function readSessionContentPreview(sessionDir, sessionId) {
   const jsonlPath = path.join(sessionDir, sessionId + '.jsonl');
+  try {
+    const stats = fs.statSync(jsonlPath);
+    if (stats.size > SESSION_JSONL_MAX_SIZE) {
+      return [{ role: 'system', text: '[日志文件过大，跳过预览以保护性能]' }];
+    }
+  } catch (e) {
+    return null;
+  }
   let content;
   try {
     content = fs.readFileSync(jsonlPath, 'utf-8');
@@ -126,8 +136,9 @@ function getSystemInfo() {
   } catch (_) {}
   try {
     const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096 });
-    const line = out.trim().split('\n').pop();
-    const pct = line.match(/(\d+)%\s*$/);
+    const lines = out.trim().split('\n').filter(Boolean);
+    const dataLine = lines[lines.length - 1]; // 最后一行是当前目录/根分区数据
+    const pct = dataLine.match(/(\d+)%/); // Capacity 列如 "22%" 或 "69% /"，不要求行尾
     if (pct) info.disk = parseInt(pct[1], 10);
   } catch (_) {}
   try {

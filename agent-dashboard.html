@@ -7,6 +7,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>OpenClaw 全量 Agent 监控</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 若内网或 CDN 不可用，可本地化 Tailwind 或使用下方备用样式保证基础布局 -->
     <style>
         html { -webkit-text-size-adjust: 100%; }
         body { font-family: 'Inter', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
@@ -43,6 +44,23 @@
             #agents-container { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 0.5rem; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.25rem; }
             .agent-card { min-width: 0; padding: 0.5rem; }
         }
+        /* CDN 不可用时的备用布局，避免页面完全错乱 */
+        .flex { display: flex; }
+        .flex-col { flex-direction: column; }
+        .flex-wrap { flex-wrap: wrap; }
+        .flex-1 { flex: 1 1 0%; min-width: 0; }
+        .shrink-0 { flex-shrink: 0; }
+        .min-h-screen { min-height: 100vh; }
+        .min-h-0 { min-height: 0; }
+        .gap-2 > * + * { margin-top: 0.5rem; }
+        .gap-3 > * + * { margin-top: 0.75rem; }
+        .gap-4 > * + * { margin-top: 1rem; }
+        .p-2 { padding: 0.5rem; }
+        .p-3 { padding: 0.75rem; }
+        .p-4 { padding: 1rem; }
+        .overflow-auto { overflow: auto; }
+        .overflow-hidden { overflow: hidden; }
+        .grid { display: grid; }
     </style>
 </head>
 <body class="min-h-screen overflow-y-auto md:h-screen md:overflow-hidden flex flex-col">
