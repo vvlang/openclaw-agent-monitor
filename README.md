@@ -49,7 +49,6 @@
 |------|------|
 | **agent-status-writer.js** | 状态写入器。轮询 `openclaw status --json`，采集 Agent、Gateway、通道、系统信息；为最近 N 个会话读取对应 `.jsonl` 最后几条 user/assistant 消息，写入 `agent-status.json`。 |
 | **agent-dashboard.html** | 单页仪表盘。展示 Agent 卡片、Gateway、系统信息、状态变化日志、最近会话、会话内容预览、原始 JSON 面板。 |
-| **STATUS_ANALYSIS.md** | 目录与数据源分析、设计说明。 |
 | **.gitignore** | 忽略 `agent-status.json`、`.DS_Store`，避免将运行时数据与系统文件提交到仓库。 |
 
 ---
@@ -91,11 +90,9 @@ npx -y serve -p 3880
 
 浏览器访问：**http://localhost:3880/agent-dashboard.html**
 
-
-
 - 本仓库若自带 `start.sh`，其逻辑一般为：后台启动 `node agent-status-writer.js`，前台执行 `npx -y serve -p 3880`；停止面板应用时会一并结束 writer 与 HTTP 服务。
 
-### 4. 后台常驻（可选）
+### 3. 后台常驻（可选）
 
 使用 `pm2`、`launchd` 或 `systemd` 等将 `node agent-status-writer.js` 设为常驻；仪表盘仍通过单独的 HTTP 服务（如 `serve`、nginx）访问同一目录。此时需保证 writer 与 HTTP 服务都能读到/提供同一路径下的 `agent-status.json`。
 
@@ -142,22 +139,22 @@ writer 使用的会话目录来自 `openclaw status --json` 中的 `sessions.byA
 
 ## 故障排查
 
-- **仪表盘显示「暂无 Agent」或「等待数据」**  
-  - 确认 writer 正在运行且无报错。  
-  - 确认本机可执行 `openclaw status --json` 且输出包含 `agents.agents`。  
+- **仪表盘显示「暂无 Agent」或「等待数据」**
+  - 确认 writer 正在运行且无报错。
+  - 确认本机可执行 `openclaw status --json` 且输出包含 `agents.agents`。
   - 若 writer 与仪表盘不在同一台机器，需保证仪表盘能通过 HTTP 访问到 writer 所在机器上的 `agent-status.json`（同源或配置 CORS）。
 
-- **会话内容预览为空**  
-  - writer 只为「最近会话」列表中的前若干条会话读取 `.jsonl`。  
-  - 确认对应会话的 `.jsonl` 路径存在且可读（路径来自 `status --json` 的 byAgent）。  
+- **会话内容预览为空**
+  - writer 只为「最近会话」列表中的前若干条会话读取 `.jsonl`。
+  - 确认对应会话的 `.jsonl` 路径存在且可读（路径来自 `status --json` 的 byAgent）。
   - 预览只包含 `role` 为 `user` 或 `assistant` 且带文本内容的行；`toolCall`/`toolResult` 等不会显示。
 
-- **系统信息（CPU/内存/磁盘/网络）为 --**  
-  - writer 在采集系统信息时若执行失败（如 `top`/`df`/`ping` 不可用或权限问题），对应项会为 null。  
+- **系统信息（CPU/内存/磁盘/网络）为 --**
+  - writer 在采集系统信息时若执行失败（如 `top`/`df`/`ping` 不可用或权限问题），对应项会为 null。
   - macOS 与 Linux 使用不同命令（如 `top -l 1 -n 0` vs `top -b -n 1`）；若为其他系统，可能需在 writer 中增加分支或降级为仅显示 load/内存。
 
-- **局域网访问仪表盘**  
-  - 使用 `npx serve -p 3880` 时，同一局域网内可通过 `http://本机IP:3880/agent-dashboard.html` 访问。  
+- **局域网访问仪表盘**
+  - 使用 `npx serve -p 3880` 时，同一局域网内可通过 `http://本机IP:3880/agent-dashboard.html` 访问。
   - 若需从外网或 HTTPS 访问，需自行配置反向代理或隧道（如 nginx、Caddy、Tailscale）。
 
 ---

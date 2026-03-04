@@ -106,7 +106,7 @@
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider">状态变化日志</h2>
                 <button type="button" onclick="clearLogs()" class="tap-target text-xs text-slate-500 hover:text-white active:bg-slate-700/50 rounded px-2">清空</button>
             </div>
-            <div id="log-stream" class="space-y-1.5 font-mono text-[10px] md:text-xs min-h-[6rem] md:min-h-[10rem] md:flex-1 md:min-h-0 overflow-y-auto overflow-x-hidden rounded border border-slate-700/50 bg-slate-800/30 p-2 shrink-0 scroll-touch">
+            <div id="log-stream" class="space-y-1.5 font-mono text-[10px] md:text-xs min-h-[5rem] max-h-[16rem] md:max-h-[16rem] overflow-y-auto overflow-x-hidden rounded border border-slate-700/50 bg-slate-800/30 p-2 shrink-0 scroll-touch">
                 <div id="log-placeholder" class="text-slate-600 italic">等待事件...</div>
             </div>
 
@@ -341,7 +341,7 @@
             div.className = (colors[type] || colors.info) + ' border-l-2 pl-2 py-0.5 bg-slate-800/50 rounded break-words';
             div.innerHTML = '<span class="text-slate-500">[' + new Date().toLocaleTimeString() + ']</span> ' + escapeHtml(message);
             logStream.insertBefore(div, logStream.firstChild);
-            while (logStream.children.length > 50) logStream.removeChild(logStream.lastChild);
+            while (logStream.children.length > 30) logStream.removeChild(logStream.lastChild);
         }
 
         function clearLogs() {
