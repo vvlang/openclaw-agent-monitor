@@ -117,6 +117,19 @@ function extractTextFromContent(content) {
 
 const SESSION_JSONL_MAX_SIZE = 50 * 1024 * 1024; // 50MB，超过则跳过读取以保护性能
 
+/** 进程内写入锁：避免 updateStatus 与 updateMemory 并发写 agent-status.json 导致数据损坏 */
+let statusFileWriteInProgress = false;
+function safeWriteStatusFile(data) {
+  if (statusFileWriteInProgress) return false;
+  statusFileWriteInProgress = true;
+  try {
+    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(data, null, 2));
+    return true;
+  } finally {
+    statusFileWriteInProgress = false;
+  }
+}
+
 /** 读取会话 .jsonl 中真正的最后几条 user/assistant 文本消息（从文件末尾往前扫） */
 function readSessionContentPreview(sessionDir, sessionId) {
   const jsonlPath = path.join(sessionDir, sessionId + '.jsonl');
@@ -226,6 +239,7 @@ function getSystemInfo() {
   }
   try {
     if (info.ip) {
+      // ⚠️ 硬编码命令，切勿从环境变量或外部输入构建命令以防止命令注入
       const pingCmd = os.platform() === 'darwin' ? 'ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
       execSync(pingCmd, { encoding: 'utf-8', timeout: COMMAND_TIMEOUT_MS });
       info.network = '在线';
@@ -270,6 +284,43 @@ function getStatusJson() {
 
 /** 解析 memory-pro list 的 stdout 为条目数组（首行可能是 [plugins]...，需从换行后的 [ 开始） */
 const MEMORY_DEBUG = process.env.OPENCLAW_MONITOR_MEMORY_DEBUG === '1';
+/** scope 最大长度，防止超长输入导致 DoS；与 GET /memory?scope= 校验一致 */
+const MEMORY_SCOPE_MAX_LENGTH = 128;
+const MEMORY_JSON_MAX_LENGTH = 1024 * 1024; // 1MB，与 exec maxBuffer 配合，防止过大 JSON 解析
+const MEMORY_JSON_MAX_DEPTH = 100; // 最大嵌套深度，防止恶意深层 JSON 导致堆栈溢出
+
+/** 粗略扫描 JSON 片段的最大括号嵌套深度（不解析字符串内容，仅统计 [ { ] }） */
+function getJsonSliceMaxDepth(slice) {
+  let depth = 0;
+  let maxDepth = 0;
+  let inString = false;
+  let escape = false;
+  let quote = '';
+  for (let i = 0; i < slice.length; i++) {
+    const c = slice[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === '\\') escape = true;
+      else if (c === quote) inString = false;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      quote = c;
+      continue;
+    }
+    if (c === '[' || c === '{') {
+      depth++;
+      if (depth > maxDepth) maxDepth = depth;
+      continue;
+    }
+    if (c === ']' || c === '}') depth--;
+  }
+  return maxDepth;
+}
 
 function parseMemoryListOutput(raw, scopeForLog) {
   const lineStart = raw.indexOf('\n[');
@@ -285,6 +336,14 @@ function parseMemoryListOutput(raw, scopeForLog) {
   }
   try {
     const slice = raw.slice(start, end + 1);
+    if (slice.length > MEMORY_JSON_MAX_LENGTH) {
+      if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'slice too long', slice.length);
+      return [];
+    }
+    if (getJsonSliceMaxDepth(slice) > MEMORY_JSON_MAX_DEPTH) {
+      if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'max depth exceeded');
+      return [];
+    }
     const arr = JSON.parse(slice);
     if (!Array.isArray(arr)) {
       if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'not array');
@@ -339,7 +398,9 @@ function updateStatus() {
       prev.gateway.reachable = false;
       prev.gateway.error = 'openclaw status 执行失败';
       prev.system = getSystemInfo();
-      fs.writeFileSync(OUTPUT_FILE, JSON.stringify(prev, null, 2));
+      if (!safeWriteStatusFile(prev)) {
+        // 写入锁被占用，跳过本轮，下一轮再写
+      }
     } catch (e) {
       console.warn('[writer] updateStatus read/write prev on status fail:', e.message || e);
     }
@@ -445,7 +506,9 @@ function updateStatus() {
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
   };
 
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(out, null, 2));
+  if (!safeWriteStatusFile(out)) {
+    // 写入锁被 updateMemory 占用，跳过本轮，下一轮 5s 再写
+  }
 
   const activeCount = agents.filter((a) => a.status === 'thinking').length;
   if (activeCount > 0) {
@@ -465,8 +528,13 @@ function updateMemory() {
   }
   const agents = data.agents || [];
   const scopes = ['global'].concat(agents.map((a) => 'agent:' + a.id));
-  Promise.all(scopes.map((scope) => getMemoryForScopeAsync(scope)))
-    .then((results) => {
+  Promise.allSettled(scopes.map((scope) => getMemoryForScopeAsync(scope)))
+    .then((outcomes) => {
+      const results = outcomes.map((o, i) => {
+        if (o.status === 'fulfilled') return o.value;
+        console.warn('[writer] updateMemory scope 失败:', scopes[i], (o.reason && (o.reason.message || o.reason)) || o.reason);
+        return [];
+      });
       let latest;
       try {
         latest = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
@@ -479,9 +547,15 @@ function updateMemory() {
       for (let i = 0; i < ag.length; i++) {
         ag[i].memoryEntries = Array.isArray(results[i + 1]) ? results[i + 1] : [];
       }
-      fs.writeFileSync(OUTPUT_FILE, JSON.stringify(latest, null, 2));
-      const total = latest.memoryGlobal.length + ag.reduce((sum, a) => sum + (a.memoryEntries || []).length, 0);
-      if (total > 0) console.log('[writer] 角色记忆已更新，共', total, '条');
+      const tryWrite = () => {
+        if (safeWriteStatusFile(latest)) {
+          const total = latest.memoryGlobal.length + ag.reduce((sum, a) => sum + (a.memoryEntries || []).length, 0);
+          if (total > 0) console.log('[writer] 角色记忆已更新，共', total, '条');
+        } else {
+          setTimeout(tryWrite, 50);
+        }
+      };
+      tryWrite();
     })
     .catch((e) => console.warn('[writer] updateMemory:', e.message || e));
 }
@@ -523,6 +597,13 @@ function serveMemoryApi(req, res) {
     res.end(JSON.stringify({ error: 'missing scope' }));
     return true;
   }
+  if (scope.length > MEMORY_SCOPE_MAX_LENGTH) {
+    console.log('[writer] GET /memory scope 超长', scope.length);
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'scope too long' }));
+    return true;
+  }
+  // 格式：global 或 agent:<id>；Agent ID 允许字母数字、下划线、点、连字符，若 OpenClaw 规范更严可在此收紧
   const safe = /^(global|agent:[a-zA-Z0-9_.-]+)$/.test(scope) ? scope : null;
   if (!safe) {
     console.log('[writer] GET /memory 非法 scope', scope);
@@ -560,10 +641,21 @@ function serveStatic(req, res) {
     }
     return true;
   }
-  const localPath = path.join(__dirname, path.basename(filePath));
-  if (path.relative(__dirname, localPath).startsWith('..')) {
+  // 路径遍历防护：只允许单段文件名，禁止 ..、.、空及路径分隔符（含 Windows \）
+  const normalized = filePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const filename = normalized.length ? normalized[normalized.length - 1] : '';
+  if (!filename || filename === '.' || filename === '..' || filename.includes('..') || /[/\\]/.test(filename)) {
     res.writeHead(404);
     res.end('Not Found');
+    return true;
+  }
+  const rootDir = path.resolve(__dirname);
+  const localPath = path.resolve(rootDir, filename);
+  // 严格校验：解析后的路径必须在 rootDir 下（不允许等于 rootDir，防止符号链接等绕过）
+  const rootPrefix = path.resolve(rootDir) + path.sep;
+  if (!localPath.startsWith(rootPrefix)) {
+    res.writeHead(403);
+    res.end('Forbidden');
     return true;
   }
   try {
@@ -591,7 +683,13 @@ function readCostConfig() {
 
 function writeCostConfig(data) {
   const out = data && typeof data.models === 'object' ? { models: data.models } : DEFAULT_COST_CONFIG;
-  fs.writeFileSync(COST_CONFIG_FILE, JSON.stringify(out, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(COST_CONFIG_FILE, JSON.stringify(out, null, 2), 'utf-8');
+    console.log('[writer] cost-config 已保存');
+  } catch (e) {
+    console.error('[writer] cost-config 保存失败:', e.message || e);
+    throw e;
+  }
 }
 
 function serveCostConfigApi(req, res) {
@@ -607,8 +705,22 @@ function serveCostConfigApi(req, res) {
   }
   if (req.method === 'POST') {
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let totalSize = 0;
+    let bodyTooLarge = false;
+    const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB，防止恶意超大 body 导致内存耗尽
+    req.on('data', (chunk) => {
+      totalSize += chunk.length;
+      if (totalSize > MAX_BODY_SIZE) {
+        bodyTooLarge = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'request body too large' }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
+      if (bodyTooLarge) return;
       try {
         const body = Buffer.concat(chunks).toString('utf-8');
         const data = JSON.parse(body);
@@ -618,10 +730,10 @@ function serveCostConfigApi(req, res) {
           return;
         }
         writeCostConfig(data);
-        console.log('[writer] cost-config 已保存');
         res.end(JSON.stringify(readCostConfig()));
       } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
+        const isWriteError = e.code && ['ENOSPC', 'EACCES', 'EROFS', 'EPERM', 'ENOENT'].includes(e.code);
+        res.writeHead(isWriteError ? 500 : 400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: String(e.message || e) }));
       }
     });
