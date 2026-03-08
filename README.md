@@ -10,7 +10,7 @@
 - **全量 Agent 监控**：自动发现 `openclaw.json` 中配置的全部 Agent，无需写死列表；每个 Agent 显示状态（空闲/工作中）、会话数、上下文占用、最近活动时间。
 - **Gateway 与通道**：展示网关是否在线、延迟、版本、主机名；通道配置摘要（如 Telegram、iMessage）。
 - **系统信息**：顶部状态栏显示本机 CPU、内存、磁盘使用率，本机 IP，外网连通状态（ping 8.8.8.8）。
-- **Token 统计**：总会话数、各 Agent 最近会话 Token 与上下文占用%，最近会话列表支持 Token 列。
+- **Token 统计**：总会话数、当前合计（各 Agent 最近会话 Token 之和）、**累计**（自 writer 启动以来按会话增量累加，持久化于 `token-cumulative-state.json`）；按 Agent 表格含「当前」与「累计」列。
 - **角色记忆（交互式）**：每个 Agent 卡片提供「读取记忆」按钮，可按需拉取 memory-lancedb-pro 的 `agent:<id>` 与「读取全局记忆」拉取 `global`，点击后请求并展示，不阻塞页面。
 - **成本设置**：模型 ID 从 OpenClaw 配置（`openclaw.json`）自动获取，可编辑各模型 input/output 单价（美元/百万 Token）并保存到 `model-pricing.json`，供后续成本估算。
 - **状态变化日志**：Agent 从「空闲」变为「工作中」或反向时自动打点，带时间戳，可清空。
@@ -43,8 +43,8 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-- **数据与 API**：`agent-status.json` 由 writer 生成（不提交 Git）；成本配置存 `model-pricing.json`（可选，不提交则用内置默认）。
-- **运行环境**：writer 需在已安装 OpenClaw 的机器上运行，且能执行 `openclaw status --json`；仪表盘通过 writer 提供的 HTTP 同源访问。
+- **数据与 API**：`agent-status.json` 由 writer 生成（不提交 Git）；成本配置存 `model-pricing.json`（可选）；Token 累计状态存 `token-cumulative-state.json`（不提交）。
+- **运行环境**：writer 需在已安装 OpenClaw 的机器上运行；`openclaw status --json` 使用 spawn + 流式读取，读到完整 JSON 后立即结束子进程，兼容安装插件（如 openclaw-self-healing）后 CLI 不退出的情况。仪表盘通过 writer 提供的 HTTP 同源访问。
 
 ---
 
@@ -52,11 +52,12 @@
 
 | 文件 | 说明 |
 |------|------|
-| **agent-status-writer.js** | 状态写入器 + HTTP 服务。轮询 `openclaw status --json`，采集 Agent、Gateway、通道、系统信息、Token；为最近 N 个会话读取 `.jsonl` 最后几条消息写入 `agent-status.json`。内置 HTTP（默认 3880）提供仪表盘、`agent-status.json`、`GET/POST /cost-config`、`GET /memory?scope=`。 |
-| **agent-dashboard.html** | 单页仪表盘。展示 Agent 卡片、Gateway、系统信息、Token 统计、状态变化日志、最近会话、会话内容预览、角色记忆（交互式）、成本设置、原始 JSON 面板。 |
-| **start.sh** | 启动脚本：直接运行 `node agent-status-writer.js`（单进程，无需单独静态服务）。 |
+| **agent-status-writer.js** | 状态写入器 + HTTP 服务。轮询 `openclaw status --json`（spawn 流式读取，兼容插件导致不退出）；采集 Agent、Gateway、通道、系统信息、Token 与累计；为最近 N 个会话读取 `.jsonl` 写入 `agent-status.json`。Gateway 离线时自动直连 URL/`/health` 或 `openclaw health --json` 做备用判定。内置 HTTP（默认 3880）提供仪表盘、`agent-status.json`、`GET/POST /cost-config`、`GET /memory?scope=`。 |
+| **agent-dashboard.html** | 单页仪表盘。展示 Agent 卡片、Gateway、系统信息、Token 统计（当前 + 累计）、状态变化日志、最近会话、会话内容预览、角色记忆（交互式）、成本设置、原始 JSON 面板。 |
+| **start.sh** | 启动脚本：设置 `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1` 后运行 `node agent-status-writer.js`（避免本机 `OPENCLAW_GATEWAY_URL` 导致 openclaw CLI 报 SECURITY ERROR），单进程无需单独静态服务。 |
 | **model-pricing.json** | 成本配置（writer 同目录），由仪表盘「成本设置」保存；不提交则使用内置默认。 |
-| **.gitignore** | 忽略 `agent-status.json`、`model-pricing.json`、`.DS_Store`。 |
+| **token-cumulative-state.json** | Token 累计状态（writer 同目录），按 Agent 记录上一会话 id/tokens 用于增量累加；不提交。 |
+| **.gitignore** | 忽略 `agent-status.json`、`model-pricing.json`、`token-cumulative-state.json`、`.DS_Store`。 |
 
 ---
 
@@ -91,7 +92,7 @@ cd openclaw-agent-monitor
 node agent-status-writer.js
 ```
 
-脚本会：每 5 秒轮询 `openclaw status --json` 并更新 `agent-status.json`；同时启动 HTTP 服务（默认端口 3880）。浏览器访问：**http://localhost:3880/agent-dashboard.html** 即可打开仪表盘，无需单独运行 `serve`。
+`start.sh` 会设置 `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`（若本机通过环境变量或 `~/.openclaw/.env` 配置了 `OPENCLAW_GATEWAY_URL`，openclaw CLI 可能报 SECURITY ERROR，该变量可避免），然后每 5 秒轮询 `openclaw status --json` 并更新 `agent-status.json`，同时启动 HTTP 服务（默认端口 3880）。浏览器访问：**http://localhost:3880/agent-dashboard.html** 即可打开仪表盘，无需单独运行 `serve`。
 
 ### 3. 后台常驻（可选）
 
@@ -105,7 +106,7 @@ node agent-status-writer.js
 - **顶部右侧**：系统信息（CPU / 内存 / 磁盘 使用率、本机 IP、网络在线/离线）→ Gateway 状态徽章 → Agent 数量与数据更新时间。
 - **Gateway 行**：网关版本、延迟、主机名；通道摘要（如 Telegram、iMessage）。
 - **Agent 卡片**：每个 Agent 一块卡片，含状态灯（绿=空闲，蓝=工作中）、名称、ID、会话数、上下文占用、简短状态文案、**「读取记忆」按钮**（点击后拉取该角色 memory-pro 记忆并展示）。
-- **Token 统计**：总会话数、Token 合计；按 Agent 表格展示最近会话 Token 与上下文%。最近会话表格支持 Token 列。
+- **Token 统计**：总会话数、当前合计、累计（持久化累计）；按 Agent 表格展示「当前」会话 Token、「累计」Token 与上下文%。最近会话表格支持 Token 列。
 - **状态变化日志**：Agent 状态变化时追加一条带时间戳的日志；支持「清空」。
 - **最近会话**：表格形式展示 agentId、距今年龄、Token、上下文占用。
 - **会话内容预览**：每个会话卡片内为最近几条用户/助手消息，**最新一条在最上方**并标「(最新)」；用户消息与助手消息用不同颜色区分。
@@ -131,6 +132,7 @@ node agent-status-writer.js
 | `OPENCLAW_MONITOR_MEMORY_DEBUG` | 未设置 | 设为 `1` 时在终端输出记忆解析调试日志。 |
 | `OPENCLAW_MONITOR_PORT` | 3880 | writer 内置 HTTP 服务端口。 |
 | `OPENCLAW_DIR` | `~/.openclaw` | OpenClaw 配置目录，用于读取 `openclaw.json`（成本设置模型 ID、可选）。 |
+| `OPENCLAW_MONITOR_GATEWAY_URL` | `http://127.0.0.1:18789` | 当 `openclaw status` 未提供 gateway URL 或报离线时，writer 直连探测用的备用网关地址（需与 OpenClaw 实际端口一致）。 |
 
 ### writer 常量（agent-status-writer.js 顶部，无环境变量时生效）
 
@@ -158,8 +160,11 @@ writer 使用的会话目录来自 `openclaw status --json` 中的 `sessions.byA
 
 - **仪表盘显示「暂无 Agent」或「等待数据」**
   - 确认 writer 正在运行且无报错（单进程下仪表盘与 API 均由 writer 提供，同源）。
-  - 确认本机可执行 `openclaw status --json` 且输出包含 `agents.agents`。
+  - 确认本机可执行 `openclaw status --json` 且输出包含 `agents.agents`。若安装 openclaw-self-healing 等插件后 CLI 不退出或报 SECURITY ERROR，请用 **`./start.sh`** 启动（会设置 `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`），或勿在环境中设置 `OPENCLAW_GATEWAY_URL`（参见 [openclaw/openclaw#11843](https://github.com/openclaw/openclaw/issues/11843)）。
   - 若通过反向代理或另一台机器访问，需保证能访问 writer 的端口（默认 3880）及 `agent-status.json`、`/cost-config`、`/memory` 等路径。
+
+- **Gateway 显示离线但 OpenClaw 实际在运行**
+  - writer 在 status 报离线时会自动做备用检测：直连 `OPENCLAW_MONITOR_GATEWAY_URL`（默认 `http://127.0.0.1:18789`）、请求 `/health`、或执行 `openclaw health --json`。若网关端口不是 18789，请设置 `OPENCLAW_MONITOR_GATEWAY_URL=http://127.0.0.1:你的端口`。
 
 - **会话内容预览为空**
   - writer 只为「最近会话」列表中的前若干条会话读取 `.jsonl`。
@@ -182,8 +187,9 @@ writer 使用的会话目录来自 `openclaw status --json` 中的 `sessions.byA
 
 ## 安全与隐私
 
-- **agent-status.json**：包含本机 Agent 列表、会话摘要、系统信息、最近消息预览等，请勿暴露到公网或不可信环境；已加入 `.gitignore`，不会随仓库推送。
+- **agent-status.json**：包含本机 Agent 列表、会话摘要、系统信息、最近消息预览、Token 累计等，请勿暴露到公网或不可信环境；已加入 `.gitignore`，不会随仓库推送。
 - **model-pricing.json**：成本配置存于 writer 同目录，仅本机或内网使用；已加入 `.gitignore`。
+- **token-cumulative-state.json**：Token 累计状态，仅本机使用；已加入 `.gitignore`。
 - **系统信息**：CPU/内存/磁盘/IP/网络状态仅在 writer 所在机器上采集，供仪表盘展示，不发送到第三方。
 - **会话内容预览**：从本地 `.jsonl` 读取并写入 `agent-status.json`，仅建议在可信环境（本机或内网）使用。
 - **角色记忆**：交互式请求 `/memory?scope=` 会执行 `openclaw memory-pro list`，返回内容仅供仪表盘展示，建议仅在本机或内网使用。

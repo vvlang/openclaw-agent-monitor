@@ -293,22 +293,27 @@
             var agents = data.agents || [];
             var sessionsTotal = data.sessionsTotal;
             var totalTokensSum = 0;
+            var cum = (data.tokenCumulative && data.tokenCumulative.byAgent) ? data.tokenCumulative.byAgent : {};
+            var globalCum = (data.tokenCumulative && data.tokenCumulative.global != null) ? data.tokenCumulative.global : 0;
             var rows = agents.map(function (a) {
                 var tok = a.totalTokens != null ? a.totalTokens : null;
                 if (tok != null) totalTokensSum += tok;
+                var cumTok = a.cumulativeTokens != null ? a.cumulativeTokens : (cum[a.id] != null ? cum[a.id] : null);
                 var pct = a.percentUsed != null ? a.percentUsed + '%' : '--';
                 return '<tr class="border-b border-slate-700/50">' +
                     '<td class="py-0.5 pr-2 truncate max-w-[80px]">' + escapeHtml(a.name || a.id) + '</td>' +
-                    '<td class="py-0.5 pr-2 text-right">' + formatTokenNum(tok) + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right" title="当前会话">' + formatTokenNum(tok) + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right text-amber-400/90" title="累计">' + formatTokenNum(cumTok) + '</td>' +
                     '<td class="py-0.5 text-right">' + pct + '</td>' +
                     '</tr>';
             }).join('');
             var summary = [];
             if (sessionsTotal != null) summary.push('总会话数 ' + sessionsTotal);
-            if (totalTokensSum > 0) summary.push('Token 合计 ' + formatTokenNum(totalTokensSum));
+            if (totalTokensSum > 0) summary.push('当前合计 ' + formatTokenNum(totalTokensSum));
+            if (globalCum > 0) summary.push('累计 ' + formatTokenNum(globalCum));
             tokenStatsEl.innerHTML =
                 (summary.length ? '<div class="text-slate-300 mb-2">' + summary.join(' · ') + '</div>' : '') +
-                (rows ? '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">Agent</th><th class="py-0.5 pr-2 text-right">Token</th><th class="py-0.5 text-right">上下文</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="text-slate-600 italic">暂无 Agent 数据</div>');
+                (rows ? '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">Agent</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 pr-2 text-right">累计</th><th class="py-0.5 text-right">上下文</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="text-slate-600 italic">暂无 Agent 数据</div>');
         }
 
         function renderRecentSessions(data) {

@@ -2,5 +2,7 @@
 agent-status.json
 # 成本配置（可选，不提交则使用内置默认）
 model-pricing.json
+# Token 累计状态（持久化累计用 Token，不提交）
+token-cumulative-state.json
 # 系统文件
 .DS_Store
