@@ -1,4 +1,6 @@
 # 运行时生成，含本机路径等
 agent-status.json
+# 成本配置（可选，不提交则使用内置默认）
+model-pricing.json
 # 系统文件
 .DS_Store

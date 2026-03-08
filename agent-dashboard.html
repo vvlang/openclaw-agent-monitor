@@ -111,6 +111,13 @@
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">Token 统计</h2>
+                <div id="token-stats" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">最近会话</h2>
                 <div id="recent-sessions" class="space-y-1 font-mono text-[10px] text-slate-400 max-h-28 md:max-h-32 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic">无数据</div>
@@ -121,6 +128,34 @@
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">会话内容预览</h2>
                 <div id="session-content" class="space-y-3 max-h-48 md:max-h-64 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic text-xs">无内容（writer 会为最近会话读取 .jsonl 预览）</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">角色记忆</h2>
+                <p class="text-[10px] text-slate-500 mb-2">memory-lancedb-pro 按 scope 区分：global、agent:&lt;id&gt;。点击下方按钮按需读取。</p>
+                <div class="flex flex-wrap gap-2 mb-2">
+                    <button type="button" id="btn-memory-global" class="tap-target text-xs px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300">读取全局记忆</button>
+                </div>
+                <div id="memory-log" class="text-[10px] text-slate-500 font-mono mb-1 min-h-[1.5rem]">—</div>
+                <div id="memory-content" class="space-y-4 max-h-64 md:max-h-80 overflow-y-auto scroll-touch">
+                    <div class="text-slate-600 italic text-xs">点击各角色卡片下的「读取记忆」或上方「读取全局记忆」加载记忆</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">成本设置</h2>
+                <p class="text-[10px] text-slate-500 mb-2">模型 ID 来自 OpenClaw 配置（openclaw.json），可编辑单价（美元/百万 Token）后保存。</p>
+                <div id="cost-config-log" class="text-[10px] text-slate-500 font-mono mb-1 min-h-[1.5rem]">—</div>
+                <div id="cost-config-table-wrap" class="overflow-x-auto max-h-48 overflow-y-auto rounded border border-slate-700/50 bg-slate-800/30 p-2">
+                    <table class="w-full font-mono text-[10px] text-slate-400" id="cost-config-table">
+                        <thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型 ID</th><th class="py-0.5 pr-2">input/M ($)</th><th class="py-0.5 pr-2">output/M ($)</th><th></th></tr></thead>
+                        <tbody id="cost-config-tbody"></tbody>
+                    </table>
+                </div>
+                <div class="flex flex-wrap gap-2 mt-2">
+                    <button type="button" id="cost-config-add" class="tap-target text-xs px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300">添加一行</button>
+                    <button type="button" id="cost-config-save" class="tap-target text-xs px-2 py-1.5 rounded bg-emerald-800 hover:bg-emerald-700 text-slate-200">保存</button>
                 </div>
             </div>
         </div>
@@ -149,7 +184,12 @@
         const gatewayDetail = document.getElementById('gateway-detail');
         const channelsSummary = document.getElementById('channels-summary');
         const recentSessionsEl = document.getElementById('recent-sessions');
+        const tokenStatsEl = document.getElementById('token-stats');
         const sessionContentEl = document.getElementById('session-content');
+        const memoryContentEl = document.getElementById('memory-content');
+        const memoryLogEl = document.getElementById('memory-log');
+        const costConfigTbody = document.getElementById('cost-config-tbody');
+        const costConfigLog = document.getElementById('cost-config-log');
 
         let previousState = {};
 
@@ -242,6 +282,35 @@
             }
         }
 
+        function formatTokenNum(n) {
+            if (n == null) return '--';
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return String(n);
+        }
+
+        function renderTokenStats(data) {
+            var agents = data.agents || [];
+            var sessionsTotal = data.sessionsTotal;
+            var totalTokensSum = 0;
+            var rows = agents.map(function (a) {
+                var tok = a.totalTokens != null ? a.totalTokens : null;
+                if (tok != null) totalTokensSum += tok;
+                var pct = a.percentUsed != null ? a.percentUsed + '%' : '--';
+                return '<tr class="border-b border-slate-700/50">' +
+                    '<td class="py-0.5 pr-2 truncate max-w-[80px]">' + escapeHtml(a.name || a.id) + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right">' + formatTokenNum(tok) + '</td>' +
+                    '<td class="py-0.5 text-right">' + pct + '</td>' +
+                    '</tr>';
+            }).join('');
+            var summary = [];
+            if (sessionsTotal != null) summary.push('总会话数 ' + sessionsTotal);
+            if (totalTokensSum > 0) summary.push('Token 合计 ' + formatTokenNum(totalTokensSum));
+            tokenStatsEl.innerHTML =
+                (summary.length ? '<div class="text-slate-300 mb-2">' + summary.join(' · ') + '</div>' : '') +
+                (rows ? '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">Agent</th><th class="py-0.5 pr-2 text-right">Token</th><th class="py-0.5 text-right">上下文</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="text-slate-600 italic">暂无 Agent 数据</div>');
+        }
+
         function renderRecentSessions(data) {
             var list = data.recentSessions;
             if (!list || !list.length) {
@@ -251,9 +320,11 @@
             recentSessionsEl.innerHTML = list.slice(0, 20).map(function (s) {
                 var age = s.age != null ? formatAge(s.age) : '--';
                 var pct = s.percentUsed != null ? s.percentUsed + '%' : '';
+                var tok = s.totalTokens != null ? formatTokenNum(s.totalTokens) : '';
                 return '<div class="flex justify-between gap-2 py-0.5 border-b border-slate-800/50">' +
                     '<span class="truncate">' + escapeHtml(s.agentId) + '</span>' +
                     '<span>' + age + '</span>' +
+                    (tok ? '<span title="Token">' + tok + '</span>' : '') +
                     '<span>' + pct + '</span>' +
                     '</div>';
             }).join('');
@@ -295,6 +366,179 @@
             return div.innerHTML;
         }
 
+        function formatMemoryTime(ts) {
+            if (ts == null) return '';
+            var d = new Date(ts);
+            return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        }
+
+        function renderMemoryList(entries, label, borderCls) {
+            borderCls = borderCls || 'border-sky-800/60';
+            var html = '<div class="rounded-lg border border-slate-700 bg-slate-800/50 p-2">';
+            html += '<div class="text-[10px] font-semibold text-slate-400 uppercase mb-1.5">' + escapeHtml(label) + '</div>';
+            if (!entries || entries.length === 0) {
+                html += '<div class="text-slate-500 italic text-xs">暂无记忆</div>';
+            } else {
+                html += '<div class="space-y-1.5">';
+                entries.forEach(function (e) {
+                    html += '<div class="text-xs text-slate-300 border-l-2 pl-2 py-0.5 bg-slate-800/40 rounded ' + borderCls + '">';
+                    html += '<div class="text-slate-400 text-[10px] mb-0.5">' + escapeHtml(e.category || '') + (e.timestamp ? ' · ' + formatMemoryTime(e.timestamp) : '') + '</div>';
+                    html += '<div class="break-words">' + escapeHtml(e.text) + '</div></div>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        function setMemoryLog(msg, isErr) {
+            if (memoryLogEl) {
+                memoryLogEl.textContent = msg;
+                memoryLogEl.className = 'text-[10px] font-mono mb-1 min-h-[1.5rem] ' + (isErr ? 'text-red-400' : 'text-slate-500');
+            }
+        }
+
+        function fetchAndShowMemory(scope, label) {
+            memoryContentEl.innerHTML = '<div class="text-slate-500 italic text-xs">加载中…</div>';
+            var apiUrl = 'memory?scope=' + encodeURIComponent(scope);
+            setMemoryLog('请求 ' + apiUrl + ' …');
+            if (typeof console !== 'undefined' && console.log) console.log('[memory] 请求', apiUrl);
+            fetch(apiUrl)
+                .then(function (r) {
+                    if (typeof console !== 'undefined' && console.log) console.log('[memory] 状态', r.status, r.statusText);
+                    if (!r.ok) throw new Error(r.statusText || '请求失败 ' + r.status);
+                    return r.json();
+                })
+                .then(function (data) {
+                    var entries = Array.isArray(data) ? data : [];
+                    if (data && !Array.isArray(data) && data.error) throw new Error(data.error);
+                    if (typeof console !== 'undefined' && console.log) console.log('[memory] 数据', Array.isArray(data) ? 'array len=' + entries.length : data);
+                    setMemoryLog(scope + ' → ' + entries.length + ' 条');
+                    var borderCls = scope === 'global' ? 'border-emerald-800/60' : 'border-sky-800/60';
+                    memoryContentEl.innerHTML = renderMemoryList(entries, label, borderCls);
+                })
+                .catch(function (e) {
+                    var msg = e.message || String(e);
+                    setMemoryLog(scope + ' → 失败: ' + msg, true);
+                    if (typeof console !== 'undefined' && console.warn) console.warn('[memory] 失败', e);
+                    memoryContentEl.innerHTML = '<div class="text-red-400 text-xs">加载失败：' + escapeHtml(msg) + '</div>';
+                });
+        }
+
+        function renderCostConfigTable(models, modelIdsFromConfig) {
+            models = models || {};
+            var ids = [];
+            (modelIdsFromConfig || []).forEach(function (id) { ids.push(id); });
+            Object.keys(models).forEach(function (id) {
+                if (ids.indexOf(id) === -1) ids.push(id);
+            });
+            costConfigTbody.innerHTML = ids.map(function (id) {
+                var m = models[id] || {};
+                var inp = m.inputPerM != null ? String(m.inputPerM) : '';
+                var out = m.outputPerM != null ? String(m.outputPerM) : '';
+                return '<tr class="border-b border-slate-700/50 cost-config-row" data-id="' + escapeHtml(id) + '">' +
+                    '<td class="py-0.5 pr-2"><input type="text" class="cost-id bg-slate-800 border border-slate-600 rounded px-1 w-full min-w-[120px]" value="' + escapeHtml(id) + '" /></td>' +
+                    '<td class="py-0.5 pr-2"><input type="text" class="cost-input bg-slate-800 border border-slate-600 rounded px-1 w-16 text-right" value="' + escapeHtml(inp) + '" placeholder="0" /></td>' +
+                    '<td class="py-0.5 pr-2"><input type="text" class="cost-output bg-slate-800 border border-slate-600 rounded px-1 w-16 text-right" value="' + escapeHtml(out) + '" placeholder="0" /></td>' +
+                    '<td class="py-0.5"><button type="button" class="cost-config-del tap-target text-slate-500 hover:text-red-400">删除</button></td>' +
+                    '</tr>';
+            }).join('');
+            if (costConfigTbody.querySelectorAll('tr').length === 0) costConfigTbody.innerHTML = '<tr><td colspan="4" class="text-slate-600 italic py-2">未找到 OpenClaw 配置中的模型，可点击「添加一行」</td></tr>';
+            bindCostConfigRowEvents();
+        }
+
+        function collectCostConfig() {
+            var models = {};
+            costConfigTbody.querySelectorAll('tr.cost-config-row').forEach(function (tr) {
+                var idEl = tr.querySelector('.cost-id');
+                var inpEl = tr.querySelector('.cost-input');
+                var outEl = tr.querySelector('.cost-output');
+                var id = (idEl && idEl.value || '').trim();
+                if (!id) return;
+                var inp = parseFloat(inpEl && inpEl.value);
+                var out = parseFloat(outEl && outEl.value);
+                models[id] = { inputPerM: isNaN(inp) ? 0 : inp, outputPerM: isNaN(out) ? 0 : out };
+            });
+            return { models: models };
+        }
+
+        function bindCostConfigRowEvents() {
+            costConfigTbody.querySelectorAll('.cost-config-del').forEach(function (btn) {
+                btn.onclick = function () { btn.closest('tr').remove(); if (!costConfigTbody.querySelector('tr.cost-config-row')) renderCostConfigTable({}, []); };
+            });
+        }
+
+        function loadCostConfig() {
+            costConfigLog.textContent = '加载中…';
+            fetch('cost-config')
+                .then(function (r) {
+                    if (!r.ok) throw new Error(r.statusText);
+                    return r.json();
+                })
+                .then(function (data) {
+                    var fromConfig = (data.modelIdsFromConfig || []).length;
+                    costConfigLog.textContent = '已加载：OpenClaw 配置 ' + fromConfig + ' 个模型，已设单价 ' + (Object.keys(data.models || {}).length) + ' 个';
+                    renderCostConfigTable(data.models || {}, data.modelIdsFromConfig);
+                })
+                .catch(function (e) {
+                    costConfigLog.textContent = '加载失败: ' + (e.message || e);
+                    costConfigLog.classList.add('text-red-400');
+                    renderCostConfigTable({});
+                });
+        }
+
+        function saveCostConfig() {
+            var payload = collectCostConfig();
+            costConfigLog.textContent = '保存中…';
+            fetch('cost-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(function (r) {
+                    if (!r.ok) return r.json().then(function (e) { throw new Error(e.error || r.statusText); });
+                    return r.json();
+                })
+                .then(function () {
+                    costConfigLog.classList.remove('text-red-400');
+                    loadCostConfig();
+                })
+                .catch(function (e) {
+                    costConfigLog.textContent = '保存失败: ' + (e.message || e);
+                    costConfigLog.classList.add('text-red-400');
+                });
+        }
+
+        (function initCostConfig() {
+            loadCostConfig();
+            document.getElementById('cost-config-add').addEventListener('click', function () {
+                var tbody = document.getElementById('cost-config-tbody');
+                var placeholder = tbody.querySelector('td[colspan="4"]');
+                if (placeholder) placeholder.closest('tr').remove();
+                var tr = document.createElement('tr');
+                tr.className = 'border-b border-slate-700/50 cost-config-row';
+                tr.innerHTML = '<td class="py-0.5 pr-2"><input type="text" class="cost-id bg-slate-800 border border-slate-600 rounded px-1 w-full min-w-[120px]" placeholder="如 anthropic/claude-sonnet-4" /></td>' +
+                    '<td class="py-0.5 pr-2"><input type="text" class="cost-input bg-slate-800 border border-slate-600 rounded px-1 w-16 text-right" placeholder="0" /></td>' +
+                    '<td class="py-0.5 pr-2"><input type="text" class="cost-output bg-slate-800 border border-slate-600 rounded px-1 w-16 text-right" placeholder="0" /></td>' +
+                    '<td class="py-0.5"><button type="button" class="cost-config-del tap-target text-slate-500 hover:text-red-400">删除</button></td>';
+                tbody.appendChild(tr);
+                bindCostConfigRowEvents();
+            });
+            document.getElementById('cost-config-save').addEventListener('click', saveCostConfig);
+        })();
+
+        (function initMemoryButtons() {
+            document.getElementById('btn-memory-global').addEventListener('click', function () {
+                fetchAndShowMemory('global', '全局 (global)');
+            });
+            document.getElementById('agents-container').addEventListener('click', function (e) {
+                if (!e.target.classList.contains('memory-btn')) return;
+                var id = e.target.getAttribute('data-agent-id');
+                var name = e.target.getAttribute('data-agent-name');
+                if (id) fetchAndShowMemory('agent:' + id, (name || id) + ' (agent:' + id + ')');
+            });
+        })();
+
         function renderAgents(data) {
             var agents = data.agents || [];
             if (agents.length === 0) {
@@ -316,7 +560,8 @@
                         '<div class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
                         (agent.sessionCount != null && agent.sessionCount > 0 ? '<div class="text-[10px] text-slate-500">' + agent.sessionCount + ' 会话</div>' : '') +
                         (agent.percentUsed != null ? '<div class="text-[10px] text-slate-500">上下文 ' + agent.percentUsed + '%</div>' : '') +
-                        (agent.message ? '<div class="text-[10px] text-slate-500 truncate max-w-full text-center px-1">' + escapeHtml(agent.message) + '</div>' : '');
+                        (agent.message ? '<div class="text-[10px] text-slate-500 truncate max-w-full text-center px-1">' + escapeHtml(agent.message) + '</div>' : '') +
+                        '<button type="button" class="memory-btn tap-target text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">读取记忆</button>';
                     agentsContainer.appendChild(card);
                 });
             }
@@ -327,6 +572,7 @@
             globalStatus.className = 'text-xs font-mono text-green-400';
 
             renderGateway(data);
+            renderTokenStats(data);
             renderRecentSessions(data);
             renderSessionContent(data);
             renderSystemInfo(data);

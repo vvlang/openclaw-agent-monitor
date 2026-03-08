@@ -3,18 +3,88 @@
  * 数据源：openclaw status --json，自动发现并监控配置中的全部 Agent。
  */
 
-const { execSync } = require('child_process');
+const { execSync, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const http = require('http');
+const url = require('url');
 
 const OUTPUT_FILE = path.join(__dirname, 'agent-status.json');
-const CHECK_INTERVAL_MS = 5000;
+const COST_CONFIG_FILE = path.join(__dirname, 'model-pricing.json');
+const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
+
+/** 从 OpenClaw 配置文件收集所有模型 ID（models.providers、agents.defaults.models、agents.list[].model） */
+function getModelIdsFromOpenClawConfig() {
+  const ids = new Set();
+  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (_) {
+    try {
+      raw = fs.readFileSync(fallbackPath, 'utf-8');
+    } catch (__) {
+      return [];
+    }
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (_) {
+    return [];
+  }
+  const providers = config.models && config.models.providers;
+  if (providers && typeof providers === 'object') {
+    for (const [provName, prov] of Object.entries(providers)) {
+      const list = prov.models;
+      if (!Array.isArray(list)) continue;
+      for (const m of list) {
+        if (!m || !m.id) continue;
+        const id = String(m.id).startsWith(provName + '/') ? m.id : provName + '/' + m.id;
+        ids.add(id);
+      }
+    }
+  }
+  const agentDefaults = config.agents && config.agents.defaults;
+  if (agentDefaults && agentDefaults.models && typeof agentDefaults.models === 'object') {
+    for (const id of Object.keys(agentDefaults.models)) ids.add(id);
+  }
+  if (agentDefaults && agentDefaults.model && agentDefaults.model.primary) {
+    ids.add(agentDefaults.model.primary);
+  }
+  const agentList = config.agents && config.agents.list;
+  if (Array.isArray(agentList)) {
+    for (const a of agentList) {
+      if (a && a.model) ids.add(a.model);
+    }
+  }
+  return Array.from(ids).sort();
+}
+
+const DEFAULT_COST_CONFIG = {
+  models: {
+    'anthropic/claude-sonnet-4': { inputPerM: 3, outputPerM: 15 },
+    'anthropic/claude-opus-4': { inputPerM: 15, outputPerM: 75 },
+    'anthropic/claude-3-5-haiku': { inputPerM: 0.8, outputPerM: 4 },
+    'openai/gpt-4o-mini': { inputPerM: 0.15, outputPerM: 0.6 },
+    'openai/gpt-4o': { inputPerM: 2.5, outputPerM: 10 },
+    'google/gemini-2.0-flash': { inputPerM: 0.1, outputPerM: 0.4 },
+  },
+};
+const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '5000', 10) || 5000;
+const COMMAND_TIMEOUT_MS = parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '5000', 10) || 5000;
 const ACTIVE_AGE_MS = 120000; // 2 分钟内有活动视为 thinking
-const SESSION_CONTENT_PREVIEW_MAX = 10; // 最多为几个会话读取内容预览
+const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
 const PREVIEW_TEXT_LEN = 120; // 每条消息预览最大字符
 const PREVIEW_MESSAGES = 4; // 每个会话保留最近几条消息预览
+const REDACT_PATHS = process.env.OPENCLAW_MONITOR_REDACT_PATHS === '1'; // 为 1 时不输出本机绝对路径（workspaceDir、gateway.url 等）
+const MEMORY_ENABLED = process.env.OPENCLAW_MONITOR_NO_MEMORY !== '1'; // 为 1 时关闭角色记忆拉取
+const MEMORY_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_MEMORY_INTERVAL_MS || '30000', 10) || 30000; // 角色记忆单独轮询间隔，默认 30s，避免阻塞主轮询
+const MEMORY_LIMIT = Math.min(100, Math.max(5, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_LIMIT || '30', 10) || 30)); // 每个 scope 最多拉取条数
+const MEMORY_TEXT_LEN = 200; // 每条记忆预览最大字符，超出截断
 
 // 按索引循环使用，支持任意数量 Agent
 const COLOR_PALETTE = [
@@ -56,12 +126,14 @@ function readSessionContentPreview(sessionDir, sessionId) {
       return [{ role: 'system', text: '[日志文件过大，跳过预览以保护性能]' }];
     }
   } catch (e) {
+    if (SESSION_CONTENT_PREVIEW_MAX > 0) console.warn('[writer] readSessionContentPreview stat:', e.message || e);
     return null;
   }
   let content;
   try {
     content = fs.readFileSync(jsonlPath, 'utf-8');
   } catch (e) {
+    if (SESSION_CONTENT_PREVIEW_MAX > 0) console.warn('[writer] readSessionContentPreview readFile:', e.message || e);
     return null;
   }
   const lines = content.trim().split('\n').filter(Boolean);
@@ -80,7 +152,9 @@ function readSessionContentPreview(sessionDir, sessionId) {
         role,
         text: text.length > PREVIEW_TEXT_LEN ? text.slice(0, PREVIEW_TEXT_LEN) + '…' : text,
       });
-    } catch (_) {}
+    } catch (e) {
+      if (SESSION_CONTENT_PREVIEW_MAX > 0) console.warn('[writer] readSessionContentPreview parse line:', e.message || e);
+    }
   }
   // 当前 messages 为 [最新, 次新, ...]，已是最新在前，直接返回
   return messages;
@@ -105,7 +179,9 @@ function getSystemInfo() {
       totalGb: (totalMem / (1024 ** 3)).toFixed(1),
       freeGb: (freeMem / (1024 ** 3)).toFixed(1),
     };
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[writer] getSystemInfo memory:', e.message || e);
+  }
   try {
     const ifaces = os.networkInterfaces();
     for (const name of Object.keys(ifaces || {})) {
@@ -117,14 +193,16 @@ function getSystemInfo() {
       }
       if (info.ip) break;
     }
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[writer] getSystemInfo networkInterfaces:', e.message || e);
+  }
   try {
     if (os.platform() === 'darwin') {
-      const out = execSync('top -l 1 -n 0 2>/dev/null', { encoding: 'utf-8', maxBuffer: 8192, timeout: 5000 });
+      const out = execSync('top -l 1 -n 0 2>/dev/null', { encoding: 'utf-8', maxBuffer: 8192, timeout: COMMAND_TIMEOUT_MS });
       const m = out.match(/([\d.]+)\s*%\s*idle/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1]));
     } else if (os.platform() === 'linux') {
-      const out = execSync("top -b -n 1 2>/dev/null | grep '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096, timeout: 5000 });
+      const out = execSync("top -b -n 1 2>/dev/null | grep '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096, timeout: COMMAND_TIMEOUT_MS });
       const m = out.match(/([\d.]+)\s*%\s*id(?:le)?\b|([\d.]+)\s+id\b/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1] || m[2]));
     }
@@ -134,23 +212,28 @@ function getSystemInfo() {
       const cpus = os.cpus().length;
       info.cpu = Math.min(100, Math.round((load / Math.max(1, cpus)) * 100));
     }
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[writer] getSystemInfo cpu/top:', e.message || e);
+  }
   try {
-    const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096, timeout: 5000 });
+    const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096, timeout: COMMAND_TIMEOUT_MS });
     const lines = out.trim().split('\n').filter(Boolean);
     const dataLine = lines[lines.length - 1]; // 最后一行是当前目录/根分区数据
     const pct = dataLine.match(/(\d+)%/); // Capacity 列如 "22%" 或 "69% /"，不要求行尾
     if (pct) info.disk = parseInt(pct[1], 10);
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[writer] getSystemInfo df:', e.message || e);
+  }
   try {
     if (info.ip) {
       const pingCmd = os.platform() === 'darwin' ? 'ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
-      execSync(pingCmd, { encoding: 'utf-8', timeout: 5000 });
+      execSync(pingCmd, { encoding: 'utf-8', timeout: COMMAND_TIMEOUT_MS });
       info.network = '在线';
     } else {
       info.network = '无外网 IP';
     }
-  } catch (_) {
+  } catch (e) {
+    if (info.ip) console.warn('[writer] getSystemInfo ping:', e.message || e);
     info.network = info.ip ? '离线' : '--';
   }
   return info;
@@ -161,7 +244,7 @@ function getStatusJson() {
     const raw = execSync('openclaw status --json 2>/dev/null', {
       encoding: 'utf-8',
       maxBuffer: 2 * 1024 * 1024,
-      timeout: 5000,
+      timeout: COMMAND_TIMEOUT_MS,
     });
     const start = raw.indexOf('{');
     if (start === -1) return null;
@@ -180,8 +263,70 @@ function getStatusJson() {
     if (end === -1) return null;
     return JSON.parse(raw.slice(start, end + 1));
   } catch (e) {
+    console.warn('[writer] getStatusJson:', e.message || e);
     return null;
   }
+}
+
+/** 解析 memory-pro list 的 stdout 为条目数组（首行可能是 [plugins]...，需从换行后的 [ 开始） */
+const MEMORY_DEBUG = process.env.OPENCLAW_MONITOR_MEMORY_DEBUG === '1';
+
+function parseMemoryListOutput(raw, scopeForLog) {
+  const lineStart = raw.indexOf('\n[');
+  const start = lineStart >= 0 ? lineStart + 1 : raw.indexOf('[');
+  if (start === -1) {
+    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'rawLen=', raw.length, 'no [ found, head=', raw.slice(0, 120));
+    return [];
+  }
+  const end = raw.lastIndexOf(']');
+  if (end === -1 || end < start) {
+    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'start=', start, 'end=', end, 'rawLen=', raw.length);
+    return [];
+  }
+  try {
+    const slice = raw.slice(start, end + 1);
+    const arr = JSON.parse(slice);
+    if (!Array.isArray(arr)) {
+      if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'not array');
+      return [];
+    }
+    const out = arr.map((entry) => ({
+      id: entry.id || null,
+      text: typeof entry.text === 'string'
+        ? (entry.text.length > MEMORY_TEXT_LEN ? entry.text.slice(0, MEMORY_TEXT_LEN) + '…' : entry.text)
+        : '',
+      category: entry.category || null,
+      importance: entry.importance != null ? entry.importance : null,
+      timestamp: entry.timestamp != null ? entry.timestamp : null,
+    })).filter((e) => e.text);
+    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'rawArrLen=', arr.length, 'afterFilter=', out.length);
+    return out;
+  } catch (e) {
+    if (MEMORY_DEBUG) console.warn('[writer] memory parse', scopeForLog, 'JSON error', e.message, 'sliceHead=', raw.slice(start, start + 150));
+    return [];
+  }
+}
+
+/** 异步拉取某 scope 的记忆（不阻塞主轮询） */
+function getMemoryForScopeAsync(scope) {
+  return new Promise((resolve) => {
+    exec(
+      `openclaw memory-pro list --scope "${scope}" --json --limit ${MEMORY_LIMIT} 2>/dev/null`,
+      { encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024, timeout: COMMAND_TIMEOUT_MS, env: process.env },
+      (err, stdout) => {
+        if (err) {
+          console.warn('[writer] memory', scope, 'exec err', err.message || err);
+          resolve([]);
+          return;
+        }
+        const raw = stdout || '';
+        if (MEMORY_DEBUG || raw.length < 10) console.log('[writer] memory', scope, 'stdoutLen=', raw.length, 'head=', raw.slice(0, 100));
+        const entries = parseMemoryListOutput(raw, scope);
+        console.log('[writer] memory', scope, '->', entries.length, '条');
+        resolve(entries);
+      }
+    );
+  });
 }
 
 function updateStatus() {
@@ -195,7 +340,9 @@ function updateStatus() {
       prev.gateway.error = 'openclaw status 执行失败';
       prev.system = getSystemInfo();
       fs.writeFileSync(OUTPUT_FILE, JSON.stringify(prev, null, 2));
-    } catch (_) {}
+    } catch (e) {
+      console.warn('[writer] updateStatus read/write prev on status fail:', e.message || e);
+    }
     return;
   }
 
@@ -228,18 +375,30 @@ function updateStatus() {
       percentUsed: recent && recent.percentUsed != null ? recent.percentUsed : null,
       lastSessionId: recent ? recent.sessionId : null,
       heartbeat: hb ? (hb.enabled ? hb.every : 'off') : 'off',
-      workspaceDir: a.workspaceDir || null,
+      workspaceDir: REDACT_PATHS ? null : (a.workspaceDir || null),
     };
   });
+
+  let prevData = null;
+  try {
+    prevData = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
+  } catch (_) {}
+  if (MEMORY_ENABLED) {
+    agents.forEach((a, i) => {
+      a.memoryEntries = (prevData && Array.isArray(prevData.agents) && prevData.agents[i] && Array.isArray(prevData.agents[i].memoryEntries))
+        ? prevData.agents[i].memoryEntries
+        : [];
+    });
+  }
 
   const gateway = status.gateway
     ? {
         reachable: !!status.gateway.reachable,
-        url: status.gateway.url || null,
+        url: REDACT_PATHS ? null : (status.gateway.url || null),
         latencyMs: status.gateway.connectLatencyMs ?? null,
         version: status.gateway.self && status.gateway.self.version ? status.gateway.self.version : null,
-        host: status.gateway.self && status.gateway.self.host ? status.gateway.self.host : null,
-        ip: status.gateway.self && status.gateway.self.ip ? status.gateway.self.ip : null,
+        host: REDACT_PATHS ? null : (status.gateway.self && status.gateway.self.host ? status.gateway.self.host : null),
+        ip: REDACT_PATHS ? null : (status.gateway.self && status.gateway.self.ip ? status.gateway.self.ip : null),
         error: status.gateway.error || null,
       }
     : { reachable: false, error: '无 gateway 数据' };
@@ -283,6 +442,7 @@ function updateStatus() {
     sessionsTotal: (status.sessions && status.sessions.count) != null ? status.sessions.count : null,
     recentSessions,
     system,
+    memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
   };
 
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(out, null, 2));
@@ -291,6 +451,39 @@ function updateStatus() {
   if (activeCount > 0) {
     console.log(`[writer] ${agents.length} agents, ${activeCount} active`);
   }
+}
+
+/** 单独、低频、异步拉取角色记忆，不阻塞主轮询与页面 */
+function updateMemory() {
+  if (!MEMORY_ENABLED) return;
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
+  } catch (e) {
+    console.warn('[writer] updateMemory read:', e.message || e);
+    return;
+  }
+  const agents = data.agents || [];
+  const scopes = ['global'].concat(agents.map((a) => 'agent:' + a.id));
+  Promise.all(scopes.map((scope) => getMemoryForScopeAsync(scope)))
+    .then((results) => {
+      let latest;
+      try {
+        latest = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
+      } catch (_) {
+        return;
+      }
+      if (!MEMORY_ENABLED) return;
+      latest.memoryGlobal = Array.isArray(results[0]) ? results[0] : [];
+      const ag = latest.agents || [];
+      for (let i = 0; i < ag.length; i++) {
+        ag[i].memoryEntries = Array.isArray(results[i + 1]) ? results[i + 1] : [];
+      }
+      fs.writeFileSync(OUTPUT_FILE, JSON.stringify(latest, null, 2));
+      const total = latest.memoryGlobal.length + ag.reduce((sum, a) => sum + (a.memoryEntries || []).length, 0);
+      if (total > 0) console.log('[writer] 角色记忆已更新，共', total, '条');
+    })
+    .catch((e) => console.warn('[writer] updateMemory:', e.message || e));
 }
 
 const initial = {
@@ -303,6 +496,7 @@ const initial = {
   sessionsTotal: null,
   recentSessions: [],
   system: null,
+  memoryGlobal: null,
 };
 if (!fs.existsSync(OUTPUT_FILE)) {
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(initial, null, 2));
@@ -312,6 +506,146 @@ console.log('OpenClaw 全量 Agent 状态写入器');
 console.log('数据源: openclaw status --json（自动发现全部 Agent）');
 console.log('输出:', OUTPUT_FILE);
 console.log('间隔:', CHECK_INTERVAL_MS, 'ms');
+if (REDACT_PATHS) console.log('路径脱敏: 已开启');
+if (SESSION_CONTENT_PREVIEW_MAX === 0) console.log('会话内容预览: 已关闭');
+if (MEMORY_ENABLED) console.log('角色记忆: 已开启 (异步, 间隔', MEMORY_INTERVAL_MS, 'ms, 每 scope 最多', MEMORY_LIMIT, '条)');
+else console.log('角色记忆: 已关闭');
+
+const SERVER_PORT = parseInt(process.env.OPENCLAW_MONITOR_PORT || '3880', 10) || 3880;
+
+function serveMemoryApi(req, res) {
+  const parsed = url.parse(req.url, true);
+  if (parsed.pathname !== '/memory' || req.method !== 'GET') return false;
+  const scope = parsed.query && parsed.query.scope;
+  if (!scope || typeof scope !== 'string') {
+    console.log('[writer] GET /memory 缺少 scope');
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'missing scope' }));
+    return true;
+  }
+  const safe = /^(global|agent:[a-zA-Z0-9_.-]+)$/.test(scope) ? scope : null;
+  if (!safe) {
+    console.log('[writer] GET /memory 非法 scope', scope);
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid scope' }));
+    return true;
+  }
+  console.log('[writer] GET /memory?scope=' + safe);
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  getMemoryForScopeAsync(safe)
+    .then((entries) => {
+      console.log('[writer] GET /memory?scope=' + safe, '响应', entries.length, '条');
+      res.end(JSON.stringify(entries));
+    })
+    .catch((e) => {
+      console.warn('[writer] GET /memory', safe, 'error', e.message || e);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    });
+  return true;
+}
+
+function serveStatic(req, res) {
+  const parsed = url.parse(req.url, true);
+  let filePath = parsed.pathname === '/' || parsed.pathname === '' ? '/agent-dashboard.html' : parsed.pathname;
+  if (filePath === '/agent-status.json') {
+    try {
+      const data = fs.readFileSync(OUTPUT_FILE, 'utf-8');
+      res.setHeader('Content-Type', 'application/json');
+      res.end(data);
+    } catch (_) {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+    return true;
+  }
+  const localPath = path.join(__dirname, path.basename(filePath));
+  if (path.relative(__dirname, localPath).startsWith('..')) {
+    res.writeHead(404);
+    res.end('Not Found');
+    return true;
+  }
+  try {
+    const data = fs.readFileSync(localPath);
+    const ext = path.extname(localPath);
+    const ct = ext === '.json' ? 'application/json' : ext === '.html' ? 'text/html; charset=utf-8' : 'application/octet-stream';
+    res.setHeader('Content-Type', ct);
+    res.end(data);
+  } catch (_) {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+  return true;
+}
+
+function readCostConfig() {
+  try {
+    const raw = fs.readFileSync(COST_CONFIG_FILE, 'utf-8');
+    const data = JSON.parse(raw);
+    return data && typeof data.models === 'object' ? data : DEFAULT_COST_CONFIG;
+  } catch (_) {
+    return DEFAULT_COST_CONFIG;
+  }
+}
+
+function writeCostConfig(data) {
+  const out = data && typeof data.models === 'object' ? { models: data.models } : DEFAULT_COST_CONFIG;
+  fs.writeFileSync(COST_CONFIG_FILE, JSON.stringify(out, null, 2), 'utf-8');
+}
+
+function serveCostConfigApi(req, res) {
+  const parsed = url.parse(req.url, true);
+  if (parsed.pathname !== '/cost-config') return false;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.method === 'GET') {
+    const cost = readCostConfig();
+    const modelIdsFromConfig = getModelIdsFromOpenClawConfig();
+    res.end(JSON.stringify({ models: cost.models, modelIdsFromConfig }));
+    return true;
+  }
+  if (req.method === 'POST') {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      try {
+        const body = Buffer.concat(chunks).toString('utf-8');
+        const data = JSON.parse(body);
+        if (!data || typeof data.models !== 'object') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid body, need { models: { ... } }' }));
+          return;
+        }
+        writeCostConfig(data);
+        console.log('[writer] cost-config 已保存');
+        res.end(JSON.stringify(readCostConfig()));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(e.message || e) }));
+      }
+    });
+    return true;
+  }
+  res.writeHead(405);
+  res.end('Method Not Allowed');
+  return true;
+}
+
+const server = http.createServer((req, res) => {
+  if (serveMemoryApi(req, res)) return;
+  if (serveCostConfigApi(req, res)) return;
+  serveStatic(req, res);
+});
+
+server.listen(SERVER_PORT, () => {
+  console.log('监控仪表盘: http://localhost:' + SERVER_PORT + '/agent-dashboard.html');
+  console.log('交互式记忆: GET /memory?scope=global 或 ?scope=agent:<id>');
+});
 
 setInterval(updateStatus, CHECK_INTERVAL_MS);
 updateStatus();
+if (MEMORY_ENABLED) {
+  setInterval(updateMemory, MEMORY_INTERVAL_MS);
+  setTimeout(updateMemory, 2000);
+}
