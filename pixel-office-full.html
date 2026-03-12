@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>像素办公室 · OpenClaw</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; background: #1e293b; color: #e2e8f0; font-family: ui-monospace, monospace; display: flex; flex-direction: column; align-items: center; padding: 0.5rem; }
+        .header { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 640px; margin-bottom: 0.5rem; }
+        .header h1 { font-size: 0.95rem; font-weight: 700; margin: 0; }
+        .header a { color: #94a3b8; text-decoration: none; font-size: 0.75rem; }
+        .header a:hover { color: #e2e8f0; }
+        #game { display: block; background: #0f172a; border: 3px solid #334155; image-rendering: pixelated; image-rendering: crisp-edges; }
+        .footer { margin-top: 0.5rem; font-size: 10px; color: #64748b; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🖥️ 像素办公室</h1>
+        <a href="agent-dashboard.html">← 返回监控</a>
+    </div>
+    <div id="legend" style="width:100%;max-width:640px;margin-bottom:4px;font-size:10px;color:#94a3b8;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
+    <canvas id="game" width="504" height="312"></canvas>
+    <div id="footer" class="footer">加载中…</div>
+
+    <script>
+(function() {
+    var DATA_FILE = 'agent-status.json';
+    var REFRESH_MS = 8000;
+    var TILE_SIZE = 24;
+    var COLS = 21;
+    var ROWS = 13;
+    var CHAR_W = 20;
+    var CHAR_H = 28;
+    var WALL = 0, FLOOR = 1;
+    var DIR_DOWN = 0, DIR_LEFT = 1, DIR_RIGHT = 2, DIR_UP = 3;
+    var WALK_SPEED = 48;
+    var WALK_FRAME_DT = 0.1;
+    var TYPE_FRAME_DT = 0.25;
+    var WANDER_PAUSE_MIN = 2, WANDER_PAUSE_MAX = 5;
+    var WANDER_MOVES_MIN = 2, WANDER_MOVES_MAX = 5;
+    var SEAT_REST_MIN = 3, SEAT_REST_MAX = 8;
+    var MAX_DT = 0.1;
+
+    var HEX_PALETTE = ['#8b5cf6','#3b82f6','#10b981','#f59e0b','#f43f5e','#06b6d4','#f97316','#d946ef','#84cc16','#0ea5e9'];
+    function colorFromAgent(a, i) {
+        if (!a || !a.color) return HEX_PALETTE[i % HEX_PALETTE.length];
+        var c = String(a.color).replace('bg-','').replace('-500','');
+        var map = { violet:'#8b5cf6', blue:'#3b82f6', emerald:'#10b981', amber:'#f59e0b', rose:'#f43f5e', cyan:'#06b6d4', orange:'#f97316', fuchsia:'#d946ef', lime:'#84cc16', sky:'#0ea5e9' };
+        return map[c] || HEX_PALETTE[i % HEX_PALETTE.length];
+    }
+
+    var tileMap = [];
+    var blockedTiles = new Set();
+    var seats = [];
+    var walkableTiles = [];
+    var decorations = [];
+
+    function buildLayout() {
+        var r, c;
+        for (r = 0; r < ROWS; r++) {
+            tileMap[r] = [];
+            for (c = 0; c < COLS; c++) {
+                if (r === 0 || r === ROWS - 1 || c === 0 || c === COLS - 1) {
+                    tileMap[r][c] = WALL;
+                } else {
+                    // 中间区域略亮，两侧略暗，模拟灯光
+                    var centerBias = Math.abs(c - COLS / 2) <= 4 && r >= 2 && r <= ROWS - 3;
+                    tileMap[r][c] = FLOOR;
+                    if (centerBias) {
+                        // 用 FLOOR 叠加渐变色，在 drawTile 里体现
+                    }
+                }
+            }
+        }
+        seats.length = 0;
+        blockedTiles.clear();
+        decorations.length = 0;
+        var seatPositions = [{c:3,r:2},{c:7,r:2},{c:11,r:2},{c:15,r:2},{c:19,r:2},{c:3,r:6},{c:7,r:6},{c:11,r:6},{c:15,r:6},{c:19,r:6}];
+        seatPositions.forEach(function(p) {
+            blockedTiles.add(p.c + ',' + (p.r - 1));
+            if (p.c < COLS - 1) blockedTiles.add((p.c + 1) + ',' + (p.r - 1));
+            seats.push({ col: p.c, row: p.r, facing: DIR_UP });
+        });
+        decorations.push({ type: 'plant', col: 1, row: 1 });
+        decorations.push({ type: 'plant', col: COLS - 2, row: 1 });
+        decorations.push({ type: 'shelf', col: 2, row: ROWS - 3 });
+        decorations.push({ type: 'board', col: Math.floor(COLS / 2) - 1, row: 1 });
+        decorations.push({ type: 'sofa', col: COLS - 6, row: ROWS - 3 });
+        decorations.push({ type: 'coffee', col: Math.floor(COLS / 2) + 3, row: ROWS - 2 });
+        decorations.push({ type: 'cooler', col: Math.floor(COLS / 2) - 1, row: ROWS - 2 });
+        walkableTiles.length = 0;
+        for (r = 1; r < ROWS - 1; r++)
+            for (c = 1; c < COLS - 1; c++)
+                if (tileMap[r][c] === FLOOR && !blockedTiles.has(c + ',' + r))
+                    walkableTiles.push({ col: c, row: r });
+    }
+
+    function isWalkable(col, row) {
+        if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return false;
+        if (tileMap[row][col] === WALL) return false;
+        if (blockedTiles.has(col + ',' + row)) return false;
+        return true;
+    }
+
+    function findPath(startCol, startRow, endCol, endRow) {
+        if (startCol === endCol && startRow === endRow) return [];
+        if (!isWalkable(endCol, endRow)) return [];
+        var key = function(c,r) { return c+','+r; };
+        var visited = new Set();
+        var parent = new Map();
+        var queue = [{col:startCol, row:startRow}];
+        visited.add(key(startCol, startRow));
+        var dirs = [{dc:0,dr:-1},{dc:0,dr:1},{dc:-1,dr:0},{dc:1,dr:0}];
+        while (queue.length > 0) {
+            var curr = queue.shift();
+            var ck = key(curr.col, curr.row);
+            if (curr.col === endCol && curr.row === endRow) {
+                var path = [];
+                var k = ck;
+                while (k) {
+                    var p = k.split(',').map(Number);
+                    path.unshift({ col: p[0], row: p[1] });
+                    k = parent.get(k);
+                }
+                return path.slice(1);
+            }
+            for (var d = 0; d < dirs.length; d++) {
+                var nc = curr.col + dirs[d].dc, nr = curr.row + dirs[d].dr;
+                var nk = key(nc, nr);
+                if (visited.has(nk) || !isWalkable(nc, nr)) continue;
+                visited.add(nk);
+                parent.set(nk, ck);
+                queue.push({ col: nc, row: nr });
+            }
+        }
+        return [];
+    }
+
+    function tileCenter(col, row) {
+        return { x: (col + 0.5) * TILE_SIZE, y: (row + 0.5) * TILE_SIZE };
+    }
+    function dirBetween(fromC, fromR, toC, toR) {
+        var dc = toC - fromC, dr = toR - fromR;
+        if (dc > 0) return DIR_RIGHT;
+        if (dc < 0) return DIR_LEFT;
+        if (dr > 0) return DIR_DOWN;
+        return DIR_UP;
+    }
+    function rand(min, max) { return min + Math.random() * (max - min); }
+    function randInt(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+
+    var nextCharId = 1;
+    var characters = [];
+    var agentIdToChar = {};
+
+    function createCharacter(agentId, name, color, seatIndex) {
+        var seat = seats[seatIndex % seats.length];
+        var center = tileCenter(seat.col, seat.row);
+        return {
+            id: nextCharId++,
+            agentId: agentId,
+            name: name || agentId,
+            message: '',
+            x: center.x,
+            y: center.y,
+            tileCol: seat.col,
+            tileRow: seat.row,
+            path: [],
+            moveProgress: 0,
+            state: 'type',
+            dir: seat.facing,
+            frame: 0,
+            frameTimer: 0,
+            isActive: false,
+            seatIndex: seatIndex % seats.length,
+            color: color,
+            wanderTimer: rand(WANDER_PAUSE_MIN, WANDER_PAUSE_MAX),
+            wanderCount: 0,
+            wanderLimit: randInt(WANDER_MOVES_MIN, WANDER_MOVES_MAX),
+            seatTimer: rand(SEAT_REST_MIN, SEAT_REST_MAX),
+            chatBubbleText: '',
+            chatBubbleTimer: 0,
+            chatCooldownUntil: 0
+        };
+    }
+
+    var CHAT_PAIRS = [
+        ['嗨！', '嘿～'],
+        ['在忙呢？', '没，溜达溜达'],
+        ['今天状态如何', '刚热身完'],
+        ['待会开会见', '好嘞'],
+        ['代码写得咋样了', '还行，调通了'],
+        ['你在看什么日志', '全是报错…'],
+        ['喝咖啡吗', '走啊'],
+        ['去续个热水', '顺便帮你带杯'],
+        ['今天天气不错', '是啊'],
+        ['工位好冷', '我带了毯子'],
+        ['有新需求吗', '刚接了一个'],
+        ['产品又改需求了', '习惯就好'],
+        ['回头聊', '嗯嗯'],
+        ['部署顺利吗', '手别抖就行'],
+        ['刚踩了个坑', '记得写到文档里'],
+        ['测试过了吗', '覆盖率还不错'],
+        ['CI 红了', '我去看下'],
+        ['今晚加班吗', '希望不用'],
+        ['要不要点奶茶', '算我一个'],
+        ['你负责哪个 Agent', '右边那位'],
+        ['网有点卡', '我也感到了'],
+        ['Gateway 稳吗', '刚才还绿着'],
+        ['刚重启了一下', '怪不得顺畅了'],
+        ['今天多少 Token 了', '不敢看…'],
+        ['日志写详细点', '以后骂自己少点'],
+        ['你在想啥', '在和用户斗智斗勇'],
+        ['有 Bug 呼我', '行，你别跑'],
+        ['模型好用吗', '偶尔发疯'],
+        ['回滚过了吗', '刚回完'],
+        ['要不要重构', '先活下来再说'],
+        ['记得写注释', '写到你看得懂'],
+        ['休息一会儿吧', '再跑一轮就歇'],
+        ['今天站会怎样', '大家都很诚实'],
+        ['需求文档看完没', '只看了标题'],
+        ['这个报错见过吗', '像老朋友了'],
+        ['又是新插件', '先别动我配置'],
+        ['你在查什么', '一个幽灵 Bug'],
+        ['上次的问题解决没', '被我驯服了'],
+        ['今天轮到谁值班', '好像是你'],
+        ['机器还顶得住吗', '风扇快起飞了'],
+        ['要不要拆分一下', 'Monolith 说不'],
+        ['多跑几条用例吧', '好，我加点边界'],
+        ['刚推上去吗', '对，我在看监控'],
+        ['出了问题喊我', '你别先下线'],
+        ['记得写 README', '下个我会感谢你'],
+        ['Token 烧得快吗', '像打火机一样'],
+        ['用户反馈咋样', '还挺喜欢的'],
+        ['要不要关灯', '再战一会儿'],
+        ['明天继续吧', '行，留点明天做'],
+        ['喝点水', '代码更好写'],
+        ['我们挺能打的', '那必须的']
+    ];
+    var CHAT_DURATION = 3.5;
+    var CHAT_COOLDOWN = 10;
+
+    function tryMeetChat() {
+        var i, j, ch, other, dist, pair, idx;
+        for (i = 0; i < characters.length; i++) {
+            ch = characters[i];
+            if (ch.chatBubbleTimer > 0 || ch.chatCooldownUntil > 0) continue;
+            if (ch.isActive || ch.state === 'type') continue;
+            for (j = i + 1; j < characters.length; j++) {
+                other = characters[j];
+                if (other.chatBubbleTimer > 0 || other.chatCooldownUntil > 0) continue;
+                if (other.isActive || other.state === 'type') continue;
+                dist = Math.abs(ch.tileCol - other.tileCol) + Math.abs(ch.tileRow - other.tileRow);
+                if (dist !== 1) continue;
+                idx = Math.floor(Math.random() * CHAT_PAIRS.length);
+                pair = CHAT_PAIRS[idx];
+                ch.chatBubbleText = pair[0];
+                ch.chatBubbleTimer = CHAT_DURATION;
+                ch.chatCooldownUntil = CHAT_COOLDOWN;
+                other.chatBubbleText = pair[1];
+                other.chatBubbleTimer = CHAT_DURATION;
+                other.chatCooldownUntil = CHAT_COOLDOWN;
+                return;
+            }
+        }
+    }
+
+    function updateCharacter(ch, dt) {
+        ch.frameTimer += dt;
+        if (ch.chatBubbleTimer > 0) ch.chatBubbleTimer = Math.max(0, ch.chatBubbleTimer - dt);
+        if (ch.chatCooldownUntil > 0) ch.chatCooldownUntil = Math.max(0, ch.chatCooldownUntil - dt);
+        var seat = seats[ch.seatIndex];
+        var atSeat = seat && ch.tileCol === seat.col && ch.tileRow === seat.row;
+
+        if (ch.state === 'type') {
+            if (ch.frameTimer >= TYPE_FRAME_DT) {
+                ch.frameTimer -= TYPE_FRAME_DT;
+                ch.frame = (ch.frame + 1) % 2;
+            }
+            if (!ch.isActive) {
+                if (ch.seatTimer > 0) {
+                    ch.seatTimer -= dt;
+                    return;
+                }
+                ch.state = 'idle';
+                ch.frame = 0;
+                ch.frameTimer = 0;
+                ch.wanderTimer = rand(WANDER_PAUSE_MIN, WANDER_PAUSE_MAX);
+                ch.wanderCount = 0;
+                ch.wanderLimit = randInt(WANDER_MOVES_MIN, WANDER_MOVES_MAX);
+            }
+            return;
+        }
+
+        if (ch.state === 'idle') {
+            ch.frame = 0;
+            if (ch.seatTimer < 0) ch.seatTimer = 0;
+            if (ch.isActive && seat) {
+                var path = findPath(ch.tileCol, ch.tileRow, seat.col, seat.row);
+                if (path.length > 0) {
+                    ch.path = path;
+                    ch.moveProgress = 0;
+                    ch.state = 'walk';
+                    ch.frame = 0;
+                    ch.frameTimer = 0;
+                } else if (atSeat) {
+                    ch.state = 'type';
+                    ch.dir = seat.facing;
+                }
+                return;
+            }
+            ch.wanderTimer -= dt;
+            if (ch.wanderTimer <= 0 && walkableTiles.length > 0) {
+                if (ch.wanderCount >= ch.wanderLimit && seat) {
+                    var pathBack = findPath(ch.tileCol, ch.tileRow, seat.col, seat.row);
+                    if (pathBack.length > 0) {
+                        ch.path = pathBack;
+                        ch.moveProgress = 0;
+                        ch.state = 'walk';
+                        ch.wanderCount = 0;
+                        ch.wanderLimit = randInt(WANDER_MOVES_MIN, WANDER_MOVES_MAX);
+                        ch.wanderTimer = rand(WANDER_PAUSE_MIN, WANDER_PAUSE_MAX);
+                        return;
+                    }
+                }
+                var target = walkableTiles[Math.floor(Math.random() * walkableTiles.length)];
+                var path = findPath(ch.tileCol, ch.tileRow, target.col, target.row);
+                if (path.length > 0) {
+                    ch.path = path;
+                    ch.moveProgress = 0;
+                    ch.state = 'walk';
+                    ch.frame = 0;
+                    ch.frameTimer = 0;
+                    ch.wanderCount++;
+                }
+                ch.wanderTimer = rand(WANDER_PAUSE_MIN, WANDER_PAUSE_MAX);
+            }
+            return;
+        }
+
+        if (ch.state === 'walk') {
+            if (ch.frameTimer >= WALK_FRAME_DT) {
+                ch.frameTimer -= WALK_FRAME_DT;
+                ch.frame = (ch.frame + 1) % 4;
+            }
+            if (ch.path.length === 0) {
+                var center = tileCenter(ch.tileCol, ch.tileRow);
+                ch.x = center.x;
+                ch.y = center.y;
+                if (ch.isActive && seat && atSeat) {
+                    ch.state = 'type';
+                    ch.dir = seat.facing;
+                } else if (seat && atSeat) {
+                    ch.state = 'type';
+                    ch.dir = seat.facing;
+                    ch.seatTimer = rand(SEAT_REST_MIN, SEAT_REST_MAX);
+                    ch.wanderCount = 0;
+                    ch.wanderLimit = randInt(WANDER_MOVES_MIN, WANDER_MOVES_MAX);
+                } else {
+                    ch.state = 'idle';
+                    ch.wanderTimer = rand(WANDER_PAUSE_MIN, WANDER_PAUSE_MAX);
+                }
+                ch.frame = 0;
+                ch.frameTimer = 0;
+                return;
+            }
+            var next = ch.path[0];
+            ch.dir = dirBetween(ch.tileCol, ch.tileRow, next.col, next.row);
+            ch.moveProgress += (WALK_SPEED / TILE_SIZE) * dt;
+            var fromC = tileCenter(ch.tileCol, ch.tileRow);
+            var toC = tileCenter(next.col, next.row);
+            var t = Math.min(ch.moveProgress, 1);
+            ch.x = fromC.x + (toC.x - fromC.x) * t;
+            ch.y = fromC.y + (toC.y - fromC.y) * t;
+            if (ch.moveProgress >= 1) {
+                ch.tileCol = next.col;
+                ch.tileRow = next.row;
+                ch.x = toC.x;
+                ch.y = toC.y;
+                ch.path.shift();
+                ch.moveProgress = 0;
+            }
+            if (ch.isActive && seat && !atSeat) {
+                var last = ch.path[ch.path.length - 1];
+                if (!last || last.col !== seat.col || last.row !== seat.row) {
+                    var newPath = findPath(ch.tileCol, ch.tileRow, seat.col, seat.row);
+                    if (newPath.length > 0) {
+                        ch.path = newPath;
+                        ch.moveProgress = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    var canvas = document.getElementById('game');
+    var ctx = canvas.getContext('2d');
+    var legendEl = document.getElementById('legend');
+
+    function drawTile(col, row, type) {
+        var x = col * TILE_SIZE, y = row * TILE_SIZE;
+        if (type === WALL) {
+            ctx.fillStyle = '#334155';
+            ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
+            if (row === 0 && col > 2 && col < COLS - 3) {
+                ctx.fillStyle = '#475569';
+                ctx.fillRect(x, y + TILE_SIZE / 2 - 2, TILE_SIZE, 4);
+            }
+        } else {
+            var even = (col + row) % 2 === 0;
+            ctx.fillStyle = even ? '#1e293b' : '#0f172a';
+            ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+            ctx.fillStyle = even ? 'rgba(51,65,85,0.4)' : 'rgba(30,41,59,0.5)';
+            ctx.fillRect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+        }
+    }
+
+    function drawDesk(col, row) {
+        var x = col * TILE_SIZE, y = row * TILE_SIZE;
+        var w = TILE_SIZE * 2;
+        ctx.fillStyle = '#57534e';
+        ctx.fillRect(x, y, w, TILE_SIZE);
+        ctx.fillStyle = '#78716c';
+        ctx.fillRect(x + 3, y + 3, w - 6, TILE_SIZE - 6);
+        ctx.fillStyle = '#44403c';
+        ctx.fillRect(x + 4, y + TILE_SIZE - 4, 6, 4);
+        ctx.fillRect(x + w - 10, y + TILE_SIZE - 4, 6, 4);
+    }
+
+    function drawDecoration(d) {
+        var x = d.col * TILE_SIZE, y = d.row * TILE_SIZE;
+        if (d.type === 'plant') {
+            ctx.fillStyle = '#15803d';
+            ctx.fillRect(x + 8, y + 12, 8, 12);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(x + 6, y + 6, 12, 10);
+            ctx.fillStyle = '#a16207';
+            ctx.fillRect(x + 10, y + 18, 4, 6);
+        } else if (d.type === 'cooler') {
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(x + 4, y + 4, TILE_SIZE * 2 - 8, TILE_SIZE - 8);
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(x + 10, y + 8, 8, 12);
+            ctx.fillStyle = '#0ea5e9';
+            ctx.fillRect(x + 12, y + 10, 4, 6);
+        } else if (d.type === 'shelf') {
+            ctx.fillStyle = '#1e293b';
+            ctx.fillRect(x, y, TILE_SIZE * 2, TILE_SIZE);
+            ctx.fillStyle = '#475569';
+            ctx.fillRect(x + 2, y + 3, TILE_SIZE * 2 - 4, 4);
+            ctx.fillRect(x + 2, y + 9, TILE_SIZE * 2 - 4, 4);
+            ctx.fillStyle = '#eab308';
+            ctx.fillRect(x + 4, y + 4, 6, 3);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fillRect(x + 12, y + 10, 6, 3);
+        } else if (d.type === 'board') {
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(x, y, TILE_SIZE * 3, TILE_SIZE);
+            ctx.strokeStyle = '#475569';
+            ctx.strokeRect(x, y, TILE_SIZE * 3, TILE_SIZE);
+            ctx.fillStyle = '#e5e7eb';
+            ctx.fillRect(x + 4, y + 4, TILE_SIZE * 3 - 8, TILE_SIZE - 8);
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(x + 6, y + 6, TILE_SIZE * 3 - 12, 3);
+        } else if (d.type === 'sofa') {
+            ctx.fillStyle = '#7c2d12';
+            ctx.fillRect(x, y + 6, TILE_SIZE * 3, TILE_SIZE - 6);
+            ctx.fillStyle = '#b91c1c';
+            ctx.fillRect(x + 3, y + 8, TILE_SIZE * 3 - 6, TILE_SIZE - 10);
+            ctx.fillStyle = '#450a0a';
+            ctx.fillRect(x + 4, y + TILE_SIZE - 2, TILE_SIZE * 3 - 8, 2);
+        } else if (d.type === 'coffee') {
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(x + 6, y + 10, TILE_SIZE - 12, 4);
+            ctx.fillStyle = '#e5e7eb';
+            ctx.fillRect(x + 9, y + 6, 6, 6);
+            ctx.fillStyle = '#78350f';
+            ctx.fillRect(x + 10, y + 7, 4, 4);
+            ctx.strokeStyle = '#e5e7eb';
+            ctx.beginPath();
+            ctx.arc(x + 16, y + 8, 3, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+
+    function drawChatBubble(ch) {
+        if (ch.chatBubbleTimer <= 0 || !ch.chatBubbleText) return;
+        var text = ch.chatBubbleText.length > 12 ? ch.chatBubbleText.slice(0, 10) + '…' : ch.chatBubbleText;
+        var bubbleY = ch.y - CHAR_H - 10;
+        var padding = 5;
+        ctx.font = '10px ui-monospace, monospace';
+        var tw = ctx.measureText(text).width;
+        var bw = Math.min(tw + padding * 2, 140);
+        var bh = 16;
+        var bx = ch.x - bw / 2;
+        if (bx < 4) bx = 4;
+        if (bx + bw > canvas.width - 4) bx = canvas.width - bw - 4;
+        ctx.fillStyle = 'rgba(30, 41, 59, 0.95)';
+        ctx.strokeStyle = '#64748b';
+        ctx.lineWidth = 1;
+        ctx.fillRect(bx, bubbleY - bh, bw, bh);
+        ctx.strokeRect(bx, bubbleY - bh, bw, bh);
+        ctx.fillStyle = '#94a3b8';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + bw / 2, bubbleY - bh / 2);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+    }
+
+    function drawBubble(ch) {
+        if (!ch.isActive || ch.state !== 'type') return;
+        var text = ch.message || '工作中…';
+        if (text.length > 18) text = text.slice(0, 15) + '…';
+        var bubbleY = ch.y - CHAR_H - 8;
+        var padding = 6;
+        ctx.font = '11px ui-monospace, monospace';
+        var tw = ctx.measureText(text).width;
+        var bw = Math.min(tw + padding * 2, 180);
+        var bh = 20;
+        var bx = ch.x - bw / 2;
+        if (bx < 4) bx = 4;
+        if (bx + bw > canvas.width - 4) bx = canvas.width - bw - 4;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+        ctx.strokeStyle = ch.color;
+        ctx.lineWidth = 2;
+        ctx.fillRect(bx, bubbleY - bh, bw, bh);
+        ctx.strokeRect(bx, bubbleY - bh, bw, bh);
+        ctx.fillStyle = '#e2e8f0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + bw / 2, bubbleY - bh / 2);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+    }
+
+    function drawCharacter(ch) {
+        var x = Math.floor(ch.x - CHAR_W / 2);
+        var y = Math.floor(ch.y - CHAR_H);
+        ctx.save();
+        ctx.translate(ch.x, ch.y);
+        var scale = 1;
+        if (ch.state === 'type') scale = 0.95 + (ch.frame === 0 ? 0 : 0.06);
+        ctx.scale(scale, scale);
+        ctx.translate(-ch.x, -ch.y);
+        var bw = 12, bh = 10;
+        var ox = (CHAR_W - bw) / 2, oy = CHAR_H - 14;
+        ctx.fillStyle = ch.color;
+        ctx.fillRect(x + ox, y + oy, bw, bh);
+        ctx.fillStyle = '#fef3c7';
+        ctx.fillRect(x + ox + 2, y + oy - 12, 8, 10);
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(x + ox + 4, y + oy - 10, 2, 2);
+        ctx.fillRect(x + ox + 8, y + oy - 10, 2, 2);
+        if (ch.state === 'walk' && (ch.frame === 1 || ch.frame === 3)) {
+            ctx.fillStyle = ch.color;
+            ctx.fillRect(x + ox - 2, y + oy + 6, 4, 4);
+            ctx.fillRect(x + ox + bw - 2, y + oy + 6, 4, 4);
+        }
+        if (ch.isActive && ch.state === 'type') {
+            ctx.shadowColor = ch.color;
+            ctx.shadowBlur = 10;
+            ctx.fillStyle = ch.color;
+            ctx.globalAlpha = 0.5;
+            ctx.fillRect(x + ox, y + oy, bw, bh);
+            ctx.globalAlpha = 1;
+            ctx.shadowBlur = 0;
+        }
+        ctx.restore();
+    }
+
+    function render() {
+        var w = canvas.width, h = canvas.height;
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, w, h);
+        var r, c;
+        for (r = 0; r < ROWS; r++)
+            for (c = 0; c < COLS; c++)
+                drawTile(c, r, tileMap[r][c]);
+        decorations.forEach(drawDecoration);
+        seats.forEach(function(s) {
+            drawDesk(s.col, s.row - 1);
+        });
+        var sorted = characters.slice().sort(function(a, b) { return a.y - b.y; });
+        sorted.forEach(function(ch) {
+            drawCharacter(ch);
+        });
+        sorted.forEach(function(ch) {
+            drawBubble(ch);
+        });
+        sorted.forEach(function(ch) {
+            drawChatBubble(ch);
+        });
+    }
+
+    function syncAgents(data) {
+        var agents = (data && data.agents) || [];
+        var lastTextByAgent = {};
+        var sessions = (data && data.recentSessions) || [];
+        sessions.forEach(function(s) {
+            if (!s || !s.agentId || !Array.isArray(s.contentPreview) || !s.contentPreview.length) return;
+            if (lastTextByAgent[s.agentId]) return;
+            var m = s.contentPreview[0];
+            if (!m || !m.text) return;
+            var prefix = m.role === 'assistant' ? '助手：' : m.role === 'user' ? '用户：' : '';
+            var txt = (prefix + m.text).trim();
+            lastTextByAgent[s.agentId] = txt;
+        });
+        var currentIds = new Set(agents.map(function(a) { return a.id; }));
+        var i;
+        for (i = characters.length - 1; i >= 0; i--) {
+            if (!currentIds.has(characters[i].agentId)) {
+                delete agentIdToChar[characters[i].agentId];
+                characters.splice(i, 1);
+            }
+        }
+        agents.forEach(function(a, idx) {
+            var ch = agentIdToChar[a.id];
+            if (!ch) {
+                ch = createCharacter(a.id, a.name || a.id, colorFromAgent(a, idx), idx);
+                characters.push(ch);
+                agentIdToChar[a.id] = ch;
+            }
+            ch.isActive = (a.status === 'thinking');
+            ch.seatIndex = idx % seats.length;
+            ch.name = a.name || a.id;
+            ch.color = colorFromAgent(a, idx);
+            var bubble = lastTextByAgent[a.id];
+            if (!bubble || !bubble.trim()) {
+                bubble = (a.message && String(a.message).trim()) ? String(a.message).trim() : '';
+            }
+            ch.message = bubble;
+        });
+        function statusLabel(s) {
+            var map = { checking: '初始化', idle: '空闲', thinking: '工作中', error: '异常' };
+            return map[s] || (s || '');
+        }
+        if (legendEl) {
+            if (agents.length === 0) {
+                legendEl.textContent = '无 Agent';
+            } else {
+                var legendHtml = '图例：';
+                agents.forEach(function(a, idx) {
+                    var ch = agentIdToChar[a.id];
+                    var color = ch ? ch.color : colorFromAgent(a, idx);
+                    var label = (a.name || a.id || '').trim() || a.id;
+                    var state = statusLabel(a.status);
+                    legendHtml += '<span style="display:inline-flex;align-items:center;margin-right:8px;">' +
+                        '<span style="width:10px;height:10px;border-radius:2px;background:' + color + ';margin-right:3px;"></span>' +
+                        '<span>' + label + (state ? '（' + state + '）' : '') + '</span>' +
+                        '</span>';
+                });
+                legendEl.innerHTML = legendHtml;
+            }
+        }
+        var t = '共 ' + characters.length + ' 个 Agent';
+        if (characters.length > 0) t += ' · 工作中会走向工位，空闲时在办公室走动';
+        document.getElementById('footer').textContent = t;
+    }
+
+    var lastTime = 0;
+    function gameLoop(time) {
+        var dt = lastTime === 0 ? 0 : Math.min((time - lastTime) / 1000, MAX_DT);
+        lastTime = time;
+        characters.forEach(function(ch) { updateCharacter(ch, dt); });
+        tryMeetChat();
+        render();
+        requestAnimationFrame(gameLoop);
+    }
+
+    buildLayout();
+    fetch(DATA_FILE + '?t=' + Date.now())
+        .then(function(r) { return r.ok ? r.json() : Promise.reject(); })
+        .then(function(data) {
+            syncAgents(data);
+            requestAnimationFrame(gameLoop);
+        })
+        .catch(function() {
+            document.getElementById('footer').textContent = '无法加载 agent-status.json，请先启动 agent-status-writer';
+            requestAnimationFrame(gameLoop);
+        });
+
+    setInterval(function() {
+        fetch(DATA_FILE + '?t=' + Date.now())
+            .then(function(r) { return r.ok ? r.json() : Promise.reject(); })
+            .then(function(data) { syncAgents(data); })
+            .catch(function() {});
+    }, REFRESH_MS);
+})();
+    </script>
+</body>
+</html>

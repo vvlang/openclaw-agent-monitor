@@ -32,6 +32,8 @@
         #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
         .agent-card { max-height: 280px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
         .agent-card-content { display: flex; flex-direction: column; gap: 0.35rem; align-items: center; min-width: 0; }
+        .agent-token-bar { height: 4px; border-radius: 2px; background: #334155; overflow: hidden; width: 100%; max-width: 120px; }
+        .agent-token-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease, background-color 0.2s; }
         .scroll-touch { -webkit-overflow-scrolling: touch; }
         .tap-target { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
         #raw-json-panel.raw-json-collapsed { width: 100%; }
@@ -74,6 +76,7 @@
                 <p class="text-[10px] md:text-xs text-slate-400 mt-0.5 hidden sm:block">监控当前配置中的全部 Agent · Gateway · 通道 · 会话</p>
             </div>
             <div class="flex items-center gap-2 md:gap-6 flex-wrap text-[10px] md:text-xs">
+                <a href="pixel-office-full.html" class="text-amber-400 hover:text-amber-300 underline shrink-0">🖥️ 像素办公室</a>
                 <div id="system-info" class="flex items-center gap-2 md:gap-4 font-mono text-slate-400 flex-wrap">
                     <span id="sys-cpu" title="CPU 使用率">--</span>
                     <span id="sys-mem" title="内存使用率">--</span>
@@ -280,6 +283,21 @@
             const m = Math.floor(s / 60);
             if (m < 60) return m + 'm';
             return Math.floor(m / 60) + 'h';
+        }
+
+        /** 最后活跃相对时间（参考 OpenClaw-bot-review formatTimeAgo） */
+        function formatTimeAgo(isoOrTs) {
+            if (!isoOrTs) return '';
+            var ts = typeof isoOrTs === 'string' ? new Date(isoOrTs).getTime() : isoOrTs;
+            if (isNaN(ts)) return '';
+            var diff = Date.now() - ts;
+            var mins = Math.floor(diff / 60000);
+            if (mins < 1) return '刚刚';
+            if (mins < 60) return mins + '分钟前';
+            var hours = Math.floor(mins / 60);
+            if (hours < 24) return hours + '小时前';
+            var days = Math.floor(hours / 24);
+            return days + '天前';
         }
 
         function renderGateway(data) {
@@ -653,6 +671,11 @@
                     if (agent.percentUsed != null) tokenLine.push(agent.percentUsed + '%');
                     var tokenStr = tokenLine.length ? tokenLine.join(' ') : '';
                     var tokenTitle = '当前 ' + (agent.totalTokens != null ? formatTokenNumShort(agent.totalTokens) : '—') + ' · 累计 ' + (agent.cumulativeTokens != null ? formatTokenNumShort(agent.cumulativeTokens) : '—') + ' · 上下文 ' + (agent.percentUsed != null ? agent.percentUsed + '%' : '—');
+                    var pct = agent.percentUsed != null ? Math.min(100, Math.max(0, Number(agent.percentUsed))) : 0;
+                    var barColor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#22c55e';
+                    var tokenBarHtml = (agent.percentUsed != null) ? ('<div class="agent-token-bar" title="上下文 ' + agent.percentUsed + '%"><div class="agent-token-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>') : '';
+                    var lastActiveStr = agent.lastActive ? formatTimeAgo(agent.lastActive) : '';
+                    var lastActiveHtml = lastActiveStr ? ('<div class="text-[9px] text-slate-500" title="最后活跃">活跃 ' + escapeHtml(lastActiveStr) + '</div>') : '';
                     card.innerHTML =
                         '<div class="absolute top-0 left-0 right-0 h-0.5 rounded-t-xl ' + (agent.color || 'bg-gray-500') + '"></div>' +
                         '<div class="agent-card-content pt-1.5">' +
@@ -664,7 +687,9 @@
                         (metaLine ? '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center" title="' + escapeHtml(agent.model || '') + '">' + metaLine + '</div>' : '') +
                         (channelTags ? '<div class="flex flex-wrap gap-0.5 justify-center">' + channelTags + '</div>' : '') +
                         '<div class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
+                        tokenBarHtml +
                         (tokenStr ? '<div class="text-[9px] text-slate-500 font-mono" title="' + escapeHtml(tokenTitle) + '">' + tokenStr + '</div>' : '') +
+                        lastActiveHtml +
                         (agent.message ? '<div class="text-[9px] text-slate-500 truncate w-full text-center" title="' + escapeHtml(agent.message) + '">' + escapeHtml(agent.message) + '</div>' : '') +
                         '<button type="button" class="memory-btn tap-target text-[9px] px-1.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 mt-0.5" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">记忆</button>' +
                         '</div>';

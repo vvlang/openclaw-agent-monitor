@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>像素办公室 · OpenClaw</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: #1e293b;
+            color: #e2e8f0;
+            font-family: ui-monospace, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1rem;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            max-width: 640px;
+            margin-bottom: 1rem;
+        }
+        .header h1 { font-size: 1rem; font-weight: 700; margin: 0; }
+        .header a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.75rem;
+        }
+        .header a:hover { color: #e2e8f0; }
+        .room {
+            width: 100%;
+            max-width: 640px;
+            background: #0f172a;
+            background-image: linear-gradient(#334155 1px, transparent 1px), linear-gradient(90deg, #334155 1px, transparent 1px);
+            background-size: 12px 12px;
+            border: 3px solid #334155;
+            border-radius: 0;
+            padding: 16px;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+        .floor {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin: 0 auto;
+        }
+        @media (min-width: 520px) {
+            .floor { grid-template-columns: repeat(5, 1fr); }
+        }
+        .desk {
+            background: #334155;
+            border: 2px solid #475569;
+            border-radius: 0;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            min-height: 100px;
+        }
+        .desk.empty { background: #1e293b; border-color: #334155; }
+        .pixel-char {
+            width: 32px;
+            height: 32px;
+            border: 2px solid rgba(0,0,0,0.3);
+            border-radius: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+            text-shadow: 0 0 1px #000;
+            flex-shrink: 0;
+        }
+        .pixel-char.idle { opacity: 0.9; }
+        .pixel-char.thinking {
+            animation: pixel-work 0.8s ease-in-out infinite;
+            box-shadow: 0 0 12px currentColor;
+        }
+        .pixel-char.error {
+            animation: pixel-err 0.5s ease-in-out infinite;
+        }
+        @keyframes pixel-work {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.08); opacity: 0.95; }
+        }
+        @keyframes pixel-err {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-2px); }
+            75% { transform: translateX(2px); }
+        }
+        .desk-name {
+            font-size: 10px;
+            color: #94a3b8;
+            text-align: center;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .desk-status {
+            font-size: 9px;
+            color: #64748b;
+        }
+        .desk-status.thinking { color: #3b82f6; }
+        .desk-status.error { color: #ef4444; }
+        .footer {
+            margin-top: 1rem;
+            font-size: 10px;
+            color: #64748b;
+        }
+        .loading { color: #94a3b8; padding: 2rem; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🖥️ 像素办公室</h1>
+        <a href="agent-dashboard.html">← 返回监控</a>
+    </div>
+    <div id="room" class="room">
+        <div id="floor" class="floor"></div>
+    </div>
+    <div id="footer" class="footer"></div>
+
+    <script>
+        var DATA_FILE = 'agent-status.json';
+        var REFRESH_MS = 10000;
+
+        var HEX_PALETTE = [
+            '#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#f43f5e',
+            '#06b6d4', '#f97316', '#d946ef', '#84cc16', '#0ea5e9'
+        ];
+
+        function getHexForIndex(i) {
+            return HEX_PALETTE[i % HEX_PALETTE.length];
+        }
+
+        function escapeHtml(s) {
+            if (s == null) return '';
+            var div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
+        function statusText(s) {
+            var map = { checking: '初始化', idle: '空闲', thinking: '工作中', error: '异常' };
+            return map[s] || s;
+        }
+
+        function renderOffice(data) {
+            var agents = data.agents || [];
+            var floor = document.getElementById('floor');
+            var footer = document.getElementById('footer');
+
+            if (agents.length === 0) {
+                floor.innerHTML = '<div class="loading" style="grid-column:1/-1">暂无 Agent，请先运行 agent-status-writer 并配置 OpenClaw</div>';
+                footer.textContent = '';
+                return;
+            }
+
+            var deskCount = Math.max(agents.length, 8);
+            if (deskCount > 15) deskCount = Math.min(agents.length + 2, 20);
+            var html = '';
+            for (var i = 0; i < deskCount; i++) {
+                var agent = agents[i];
+                if (!agent) {
+                    html += '<div class="desk empty"><div class="pixel-char" style="background:#334155;color:#64748b">—</div><div class="desk-name">空位</div></div>';
+                    continue;
+                }
+                var hex = agent.color ? (function() {
+                    var c = agent.color.replace('bg-', '').replace('-500', '');
+                    var map = { violet: '#8b5cf6', blue: '#3b82f6', emerald: '#10b981', amber: '#f59e0b', rose: '#f43f5e', cyan: '#06b6d4', orange: '#f97316', fuchsia: '#d946ef', lime: '#84cc16', sky: '#0ea5e9' };
+                    return map[c] || getHexForIndex(i);
+                })() : getHexForIndex(i);
+                var initial = (agent.name || agent.id || '?').charAt(0).toUpperCase();
+                var statusClass = agent.status === 'thinking' ? 'thinking' : agent.status === 'error' ? 'error' : 'idle';
+                html +=
+                    '<div class="desk" title="' + escapeHtml(agent.name || agent.id) + '">' +
+                    '<div class="pixel-char ' + statusClass + '" style="background:' + hex + '">' + escapeHtml(initial) + '</div>' +
+                    '<div class="desk-name">' + escapeHtml(agent.name || agent.id) + '</div>' +
+                    '<div class="desk-status ' + (agent.status === 'thinking' ? 'thinking' : agent.status === 'error' ? 'error' : '') + '">' + statusText(agent.status) + '</div>' +
+                    '</div>';
+            }
+            floor.innerHTML = html;
+            footer.textContent = '共 ' + agents.length + ' 个 Agent · 数据来自 agent-status.json';
+        }
+
+        function fetchData() {
+            fetch(DATA_FILE + '?t=' + Date.now())
+                .then(function(r) { return r.ok ? r.json() : Promise.reject(new Error('No data')); })
+                .then(function(data) {
+                    renderOffice(data);
+                })
+                .catch(function() {
+                    document.getElementById('floor').innerHTML = '<div class="loading" style="grid-column:1/-1">无法加载数据，请确保 agent-status-writer 已启动</div>';
+                });
+        }
+
+        fetchData();
+        setInterval(fetchData, REFRESH_MS);
+    </script>
+</body>
+</html>
