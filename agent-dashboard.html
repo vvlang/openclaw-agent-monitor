@@ -80,6 +80,16 @@
                     <span id="sys-net" title="外网状态">--</span>
                 </div>
                 <div id="gateway-badge" class="font-mono px-2 py-1 rounded bg-slate-700/80">--</div>
+                <div class="flex items-center gap-2">
+                    <label class="text-slate-500 text-[10px]">刷新</label>
+                    <select id="refresh-interval" class="bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-slate-300 text-[10px]">
+                        <option value="2">2 秒</option>
+                        <option value="10">10 秒</option>
+                        <option value="30">30 秒</option>
+                        <option value="60">1 分钟</option>
+                        <option value="300">5 分钟</option>
+                    </select>
+                </div>
                 <div>
                     <div id="global-status" class="font-mono text-slate-400">等待数据...</div>
                     <div id="last-update" class="text-[10px] text-slate-600 mt-0.5">--:--:--</div>
@@ -89,6 +99,7 @@
 
         <div id="gateway-row" class="flex flex-wrap gap-2 md:gap-4 items-center text-[10px] md:text-xs mt-2 md:mb-4 hidden">
             <span id="gateway-detail" class="text-slate-400"></span>
+            <a id="gateway-control-ui-link" href="#" target="_blank" rel="noopener" class="hidden text-amber-400 hover:text-amber-300 underline">打开 Control UI</a>
             <span id="channels-summary" class="text-slate-500 truncate max-w-full"></span>
         </div>
 
@@ -140,6 +151,20 @@
                 <div id="memory-log" class="text-[10px] text-slate-500 font-mono mb-1 min-h-[1.5rem]">—</div>
                 <div id="memory-content" class="space-y-4 max-h-64 md:max-h-80 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic text-xs">点击各角色卡片下的「读取记忆」或上方「读取全局记忆」加载记忆</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">模型列表</h2>
+                <div id="models-summary" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 max-h-32 overflow-y-auto">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">插件与技能</h2>
+                <div id="plugins-summary" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 max-h-28 overflow-y-auto">
+                    <div class="text-slate-600 italic">等待数据...</div>
                 </div>
             </div>
 
@@ -257,8 +282,10 @@
 
         function renderGateway(data) {
             const gw = data.gateway;
+            const controlUiLink = document.getElementById('gateway-control-ui-link');
             if (!gw) {
                 gatewayRow.classList.add('hidden');
+                if (controlUiLink) controlUiLink.classList.add('hidden');
                 return;
             }
             gatewayRow.classList.remove('hidden');
@@ -270,10 +297,15 @@
                     gw.latencyMs != null && gw.latencyMs + 'ms',
                     gw.host && gw.host
                 ].filter(Boolean).join(' · ');
+                if (data.controlUiUrl && controlUiLink) {
+                    controlUiLink.href = data.controlUiUrl;
+                    controlUiLink.classList.remove('hidden');
+                } else if (controlUiLink) controlUiLink.classList.add('hidden');
             } else {
                 gatewayBadge.textContent = 'Gateway 离线';
                 gatewayBadge.className = 'text-xs font-mono px-2 py-1 rounded gateway-fail bg-red-900/30';
                 gatewayDetail.textContent = gw.error || '不可达';
+                if (controlUiLink) controlUiLink.classList.add('hidden');
             }
             if (Array.isArray(data.channels) && data.channels.length) {
                 channelsSummary.textContent = data.channels.slice(0, 4).join(' | ');
@@ -314,6 +346,49 @@
             tokenStatsEl.innerHTML =
                 (summary.length ? '<div class="text-slate-300 mb-2">' + summary.join(' · ') + '</div>' : '') +
                 (rows ? '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">Agent</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 pr-2 text-right">累计</th><th class="py-0.5 text-right">上下文</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="text-slate-600 italic">暂无 Agent 数据</div>');
+        }
+
+        function renderModelsSummary(data) {
+            var el = document.getElementById('models-summary');
+            if (!el) return;
+            var list = data.modelsSummary;
+            if (!list || !list.length) {
+                el.innerHTML = '<div class="text-slate-600 italic">暂无模型配置</div>';
+                return;
+            }
+            var rows = list.map(function (m) {
+                var name = (m.id && m.id.indexOf('/') >= 0) ? m.id.split('/').pop() : (m.id || m.name || '');
+                var ctx = m.contextWindow != null ? (m.contextWindow >= 1000 ? (m.contextWindow / 1000) + 'K' : m.contextWindow) : '--';
+                var maxT = m.maxTokens != null ? m.maxTokens : '--';
+                var reason = m.reasoning ? '是' : '—';
+                return '<tr class="border-b border-slate-700/50">' +
+                    '<td class="py-0.5 pr-2 truncate max-w-[100px]" title="' + escapeHtml(m.id || '') + '">' + escapeHtml(name) + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right">' + ctx + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right">' + maxT + '</td>' +
+                    '<td class="py-0.5 text-slate-500">' + reason + '</td>' +
+                    '</tr>';
+            }).join('');
+            el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">上下文</th><th class="py-0.5 pr-2 text-right">maxOut</th><th class="py-0.5">推理</th></tr></thead><tbody>' + rows + '</tbody></table>';
+        }
+
+        function renderPluginsSummary(data) {
+            var el = document.getElementById('plugins-summary');
+            if (!el) return;
+            var ps = data.pluginsSummary;
+            if (!ps) {
+                el.innerHTML = '<div class="text-slate-600 italic">暂无数据</div>';
+                return;
+            }
+            var parts = [];
+            if (ps.plugins && (ps.plugins.enabled.length || ps.plugins.disabled.length)) {
+                parts.push('<div class="mb-1"><span class="text-slate-500">插件</span> 已启用: ' + (ps.plugins.enabled.length ? ps.plugins.enabled.join(', ') : '—') + '</div>');
+                if (ps.plugins.disabled.length) parts.push('<div class="text-slate-500">已禁用: ' + ps.plugins.disabled.join(', ') + '</div>');
+            }
+            if (ps.skills && (ps.skills.enabled.length || ps.skills.disabled.length)) {
+                parts.push('<div class="mt-1"><span class="text-slate-500">技能</span> 已启用: ' + (ps.skills.enabled.length ? ps.skills.enabled.join(', ') : '—') + '</div>');
+                if (ps.skills.disabled.length) parts.push('<div class="text-slate-500">已禁用: ' + ps.skills.disabled.join(', ') + '</div>');
+            }
+            el.innerHTML = parts.length ? parts.join('') : '<div class="text-slate-600 italic">暂无插件/技能配置</div>';
         }
 
         function renderRecentSessions(data) {
@@ -550,21 +625,42 @@
                 agentsContainer.innerHTML = '<div class="col-span-full text-center py-6 text-slate-500">暂无 Agent（请运行 agent-status-writer.js 并确保 OpenClaw 已配置 Agent）</div>';
             } else {
                 agentsContainer.innerHTML = '';
+                var channelLabels = { telegram: 'Telegram', imessage: 'iMessage', dingtalk: '钉钉', discord: 'Discord', feishu: '飞书', slack: 'Slack', webchat: 'WebChat' };
+                function formatTokenNumShort(n) {
+                    if (n == null) return '—';
+                    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+                    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+                    return String(n);
+                }
                 agents.forEach(function (agent) {
                     var statusClass = getStatusClass(agent.status);
                     var isThinking = agent.status === 'thinking';
                     var card = document.createElement('div');
                     card.className = 'agent-card rounded-xl p-3 flex flex-col items-center justify-center gap-2 relative overflow-hidden' + (isThinking ? ' thinking' : '');
+                    var modelName = (agent.model && agent.model.trim()) ? (agent.model.indexOf('/') >= 0 ? agent.model.split('/').pop() : agent.model) : '';
+                    var modelDisplay = modelName ? escapeHtml(modelName) : '';
+                    var channels = agent.boundChannels || [];
+                    var channelTags = channels.map(function (ch) {
+                        var label = channelLabels[ch] || ch;
+                        return '<span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-slate-700/80 text-slate-300">' + escapeHtml(label) + '</span>';
+                    }).join(' ');
+                    var tokenLine = [];
+                    if (agent.totalTokens != null) tokenLine.push('当前 ' + formatTokenNumShort(agent.totalTokens));
+                    if (agent.cumulativeTokens != null && agent.cumulativeTokens > 0) tokenLine.push('累计 ' + formatTokenNumShort(agent.cumulativeTokens));
+                    if (agent.percentUsed != null) tokenLine.push('上下文 ' + agent.percentUsed + '%');
+                    var tokenBlock = tokenLine.length ? '<div class="text-[10px] text-slate-500 font-mono">' + tokenLine.join(' · ') + '</div>' : '';
                     card.innerHTML =
                         '<div class="absolute top-0 left-0 w-full h-1 ' + (agent.color || 'bg-gray-500') + '"></div>' +
                         '<div class="w-4 h-4 rounded-full status-dot ' + statusClass + '"></div>' +
-                        '<div class="text-center">' +
+                        '<div class="text-center min-w-0">' +
                         '<div class="text-sm font-bold text-white leading-tight">' + escapeHtml(agent.name || agent.id || '未知 Agent') + '</div>' +
                         '<div class="text-[10px] text-slate-400 font-mono uppercase">' + escapeHtml(agent.id) + '</div>' +
+                        (modelDisplay ? '<div class="text-[10px] text-slate-500 font-mono truncate max-w-full" title="' + escapeHtml(agent.model || '') + '">' + modelDisplay + '</div>' : '') +
                         '</div>' +
+                        (channelTags ? '<div class="flex flex-wrap gap-1 justify-center">' + channelTags + '</div>' : '') +
                         '<div class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
                         (agent.sessionCount != null && agent.sessionCount > 0 ? '<div class="text-[10px] text-slate-500">' + agent.sessionCount + ' 会话</div>' : '') +
-                        (agent.percentUsed != null ? '<div class="text-[10px] text-slate-500">上下文 ' + agent.percentUsed + '%</div>' : '') +
+                        tokenBlock +
                         (agent.message ? '<div class="text-[10px] text-slate-500 truncate max-w-full text-center px-1">' + escapeHtml(agent.message) + '</div>' : '') +
                         '<button type="button" class="memory-btn tap-target text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">读取记忆</button>';
                     agentsContainer.appendChild(card);
@@ -578,6 +674,8 @@
 
             renderGateway(data);
             renderTokenStats(data);
+            renderModelsSummary(data);
+            renderPluginsSummary(data);
             renderRecentSessions(data);
             renderSessionContent(data);
             renderSystemInfo(data);
@@ -642,7 +740,33 @@
             });
         })();
 
-        setInterval(fetchData, 2000);
+        (function initRefreshInterval() {
+            var selectEl = document.getElementById('refresh-interval');
+            var intervalMs = 2000;
+            var tid = null;
+            function startInterval() {
+                if (tid) clearInterval(tid);
+                tid = setInterval(fetchData, intervalMs);
+            }
+            if (selectEl) {
+                try {
+                    var saved = localStorage.getItem('openclaw-monitor-refresh-sec');
+                    if (saved) {
+                        var v = parseInt(saved, 10);
+                        if ([2, 10, 30, 60, 300].indexOf(v) >= 0) {
+                            selectEl.value = String(v);
+                            intervalMs = v * 1000;
+                        }
+                    }
+                } catch (e) {}
+                selectEl.addEventListener('change', function () {
+                    intervalMs = parseInt(selectEl.value, 10) * 1000;
+                    try { localStorage.setItem('openclaw-monitor-refresh-sec', selectEl.value); } catch (e) {}
+                    startInterval();
+                });
+            }
+            startInterval();
+        })();
         fetchData();
         addLog('监控已启动，将显示 OpenClaw 中全部 Agent', 'info');
     </script>

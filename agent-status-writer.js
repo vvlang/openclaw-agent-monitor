@@ -183,6 +183,158 @@ function getModelIdsFromOpenClawConfig() {
   return Array.from(ids).sort();
 }
 
+/** 从 OpenClaw 配置读取每个 Agent 使用的模型 ID（agents.list[].model，缺省用 agents.defaults.model.primary） */
+function getAgentModelFromOpenClawConfig() {
+  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (_) {
+    try {
+      raw = fs.readFileSync(fallbackPath, 'utf-8');
+    } catch (__) {
+      return {};
+    }
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (_) {
+    return {};
+  }
+  const defaultModel = (config.agents && config.agents.defaults && config.agents.defaults.model && config.agents.defaults.model.primary)
+    ? config.agents.defaults.model.primary
+    : null;
+  const out = {};
+  const agentList = config.agents && config.agents.list;
+  if (Array.isArray(agentList)) {
+    for (const a of agentList) {
+      if (a && a.id) out[a.id] = a.model || defaultModel || null;
+    }
+  }
+  return out;
+}
+
+/** 从 OpenClaw 配置读取每个 Agent 绑定的通道（bindings[].agentId + match.channel），用于仪表盘展示对接的聊天工具 */
+function getAgentChannelsFromConfig() {
+  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (_) {
+    try {
+      raw = fs.readFileSync(fallbackPath, 'utf-8');
+    } catch (__) {
+      return {};
+    }
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (_) {
+    return {};
+  }
+  const out = {};
+  const bindings = config.bindings;
+  if (Array.isArray(bindings)) {
+    for (const b of bindings) {
+      if (!b || !b.agentId) continue;
+      const ch = b.match && b.match.channel;
+      if (ch && typeof ch === 'string') {
+        if (!out[b.agentId]) out[b.agentId] = [];
+        if (!out[b.agentId].includes(ch)) out[b.agentId].push(ch);
+      }
+    }
+  }
+  return out;
+}
+
+/** 从 OpenClaw 配置读取模型列表摘要（用于仪表盘「模型列表」：id、name、contextWindow、maxTokens、reasoning） */
+function getModelsSummaryFromConfig() {
+  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (_) {
+    try {
+      raw = fs.readFileSync(fallbackPath, 'utf-8');
+    } catch (__) {
+      return [];
+    }
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (_) {
+    return [];
+  }
+  const list = [];
+  const providers = config.models && config.models.providers;
+  if (providers && typeof providers === 'object') {
+    for (const [provName, prov] of Object.entries(providers)) {
+      const models = prov.models;
+      if (!Array.isArray(models)) continue;
+      for (const m of models) {
+        if (!m || !m.id) continue;
+        const id = String(m.id).startsWith(provName + '/') ? m.id : provName + '/' + m.id;
+        list.push({
+          id,
+          name: m.name || m.id,
+          provider: provName,
+          contextWindow: m.contextWindow != null ? m.contextWindow : null,
+          maxTokens: m.maxTokens != null ? m.maxTokens : null,
+          reasoning: !!(m.reasoning),
+        });
+      }
+    }
+  }
+  return list;
+}
+
+/** 从 OpenClaw 配置读取插件/技能摘要（plugins.entries + skills.entries，用于仪表盘「插件/技能」） */
+function getPluginsSummaryFromConfig() {
+  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (_) {
+    try {
+      raw = fs.readFileSync(fallbackPath, 'utf-8');
+    } catch (__) {
+      return { plugins: { enabled: [], disabled: [] }, skills: { enabled: [], disabled: [] } };
+    }
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (_) {
+    return { plugins: { enabled: [], disabled: [] }, skills: { enabled: [], disabled: [] } };
+  }
+  const pluginsEnabled = [];
+  const pluginsDisabled = [];
+  const pe = config.plugins && config.plugins.entries;
+  if (pe && typeof pe === 'object') {
+    for (const [id, ent] of Object.entries(pe)) {
+      if (ent && ent.enabled) pluginsEnabled.push(id);
+      else pluginsDisabled.push(id);
+    }
+  }
+  const skillsEnabled = [];
+  const skillsDisabled = [];
+  const se = config.skills && config.skills.entries;
+  if (se && typeof se === 'object') {
+    for (const [id, ent] of Object.entries(se)) {
+      if (ent && ent.enabled) skillsEnabled.push(id);
+      else skillsDisabled.push(id);
+    }
+  }
+  return { plugins: { enabled: pluginsEnabled, disabled: pluginsDisabled }, skills: { enabled: skillsEnabled, disabled: skillsDisabled } };
+}
+
 const DEFAULT_COST_CONFIG = {
   models: {
     'anthropic/claude-sonnet-4': { inputPerM: 3, outputPerM: 15 },
@@ -579,6 +731,8 @@ async function updateStatus() {
   const byAgent = (status.sessions && status.sessions.byAgent) ? status.sessions.byAgent : [];
   const agentsList = (status.agents && status.agents.agents) ? status.agents.agents : [];
   const heartbeatAgents = (status.heartbeat && status.heartbeat.agents) ? status.heartbeat.agents : [];
+  const agentModelFromConfig = getAgentModelFromOpenClawConfig();
+  const agentChannelsFromConfig = getAgentChannelsFromConfig();
 
   const agents = agentsList.map((a, index) => {
     const lastActiveAgeMs = a.lastActiveAgeMs != null ? a.lastActiveAgeMs : null;
@@ -593,12 +747,16 @@ async function updateStatus() {
     if (recent && recent.percentUsed != null) {
       message += ` · 上下文 ${recent.percentUsed}%`;
     }
+    const modelId = agentModelFromConfig[a.id] != null ? agentModelFromConfig[a.id] : (a.model || null);
+    const boundChannels = Array.isArray(agentChannelsFromConfig[a.id]) ? agentChannelsFromConfig[a.id] : [];
     return {
       id: a.id,
       name: a.name || a.id,
       color: getColorForIndex(index),
       status: statusStr,
       message,
+      model: modelId,
+      boundChannels,
       lastActive: a.lastUpdatedAt ? new Date(a.lastUpdatedAt).toISOString() : null,
       sessionCount: a.sessionsCount ?? 0,
       totalTokens: recent && recent.totalTokens != null ? recent.totalTokens : null,
@@ -721,18 +879,23 @@ async function updateStatus() {
 
   const system = getSystemInfo();
 
+  const controlUiUrl = gateway.reachable ? (gateway.url || GATEWAY_FALLBACK_URL) : null;
+
   const out = {
     lastUpdated: new Date().toISOString(),
     defaultAgentId: (status.agents && status.agents.defaultId) || null,
     agents,
     gateway,
     gatewayService,
+    controlUiUrl,
     channels: Array.isArray(status.channelSummary) ? status.channelSummary : [],
     sessionsTotal: (status.sessions && status.sessions.count) != null ? status.sessions.count : null,
     recentSessions,
     system,
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
     tokenCumulative: { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal },
+    modelsSummary: getModelsSummaryFromConfig(),
+    pluginsSummary: getPluginsSummaryFromConfig(),
   };
 
   if (!safeWriteStatusFile(out)) {
