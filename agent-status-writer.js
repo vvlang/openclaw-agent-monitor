@@ -16,6 +16,15 @@ const GATEWAY_PROBE_TIMEOUT_MS = 3000;
 /** 当 status 未提供 gateway.url 时使用的备用 URL（OpenClaw 默认端口 18789） */
 const GATEWAY_FALLBACK_URL = process.env.OPENCLAW_MONITOR_GATEWAY_URL || 'http://127.0.0.1:18789';
 const OUTPUT_FILE = path.join(__dirname, 'agent-status.json');
+
+/** 将 ws/wss URL 转为 http/https，供 Control UI 链接使用（浏览器打开需 http） */
+function toHttpUrl(anyUrl) {
+  if (!anyUrl || typeof anyUrl !== 'string') return anyUrl;
+  const s = anyUrl.trim();
+  if (s.startsWith('ws://')) return 'http://' + s.slice(5);
+  if (s.startsWith('wss://')) return 'https://' + s.slice(6);
+  return s;
+}
 const COST_CONFIG_FILE = path.join(__dirname, 'model-pricing.json');
 
 /**
@@ -879,7 +888,8 @@ async function updateStatus() {
 
   const system = getSystemInfo();
 
-  const controlUiUrl = gateway.reachable ? (gateway.url || GATEWAY_FALLBACK_URL) : null;
+  const rawControlUrl = gateway.reachable ? (gateway.url || GATEWAY_FALLBACK_URL) : null;
+  const controlUiUrl = rawControlUrl ? toHttpUrl(rawControlUrl) : null;
 
   const out = {
     lastUpdated: new Date().toISOString(),
