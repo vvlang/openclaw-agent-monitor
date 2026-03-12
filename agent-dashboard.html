@@ -29,7 +29,9 @@
         .sys-high { color: #ef4444; }
         .sys-online { color: #22c55e; }
         .sys-offline { color: #64748b; }
-        #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+        #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+        .agent-card { max-height: 280px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+        .agent-card-content { display: flex; flex-direction: column; gap: 0.35rem; align-items: center; min-width: 0; }
         .scroll-touch { -webkit-overflow-scrolling: touch; }
         .tap-target { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
         #raw-json-panel.raw-json-collapsed { width: 100%; }
@@ -41,8 +43,8 @@
         @media (max-width: 768px) {
             body { min-height: 100vh; min-height: 100dvh; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; }
             .safe-area-padding { padding-left: env(safe-area-inset-left, 0); padding-right: env(safe-area-inset-right, 0); padding-top: env(safe-area-inset-top, 0); }
-            #agents-container { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 0.5rem; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.25rem; }
-            .agent-card { min-width: 0; padding: 0.5rem; }
+            #agents-container { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.25rem; }
+            .agent-card { min-width: 0; padding: 0.5rem; max-height: 260px; }
         }
         /* CDN 不可用时的备用布局，避免页面完全错乱 */
         .flex { display: flex; }
@@ -625,7 +627,7 @@
                 agentsContainer.innerHTML = '<div class="col-span-full text-center py-6 text-slate-500">暂无 Agent（请运行 agent-status-writer.js 并确保 OpenClaw 已配置 Agent）</div>';
             } else {
                 agentsContainer.innerHTML = '';
-                var channelLabels = { telegram: 'Telegram', imessage: 'iMessage', dingtalk: '钉钉', discord: 'Discord', feishu: '飞书', slack: 'Slack', webchat: 'WebChat' };
+                var channelLabels = { telegram: 'TG', imessage: 'iMsg', dingtalk: '钉钉', discord: 'DC', feishu: '飞书', slack: 'Slack', webchat: 'Web' };
                 function formatTokenNumShort(n) {
                     if (n == null) return '—';
                     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -636,33 +638,36 @@
                     var statusClass = getStatusClass(agent.status);
                     var isThinking = agent.status === 'thinking';
                     var card = document.createElement('div');
-                    card.className = 'agent-card rounded-xl p-3 flex flex-col items-center justify-center gap-2 relative overflow-hidden' + (isThinking ? ' thinking' : '');
+                    card.className = 'agent-card rounded-xl p-2.5 flex flex-col relative' + (isThinking ? ' thinking' : '');
                     var modelName = (agent.model && agent.model.trim()) ? (agent.model.indexOf('/') >= 0 ? agent.model.split('/').pop() : agent.model) : '';
                     var modelDisplay = modelName ? escapeHtml(modelName) : '';
                     var channels = agent.boundChannels || [];
                     var channelTags = channels.map(function (ch) {
                         var label = channelLabels[ch] || ch;
-                        return '<span class="inline-block px-1.5 py-0.5 rounded text-[10px] bg-slate-700/80 text-slate-300">' + escapeHtml(label) + '</span>';
-                    }).join(' ');
+                        return '<span class="px-1 py-0.5 rounded text-[9px] bg-slate-700/80 text-slate-300" title="' + escapeHtml(ch) + '">' + escapeHtml(label) + '</span>';
+                    }).join('');
+                    var metaLine = [modelDisplay, (agent.sessionCount != null && agent.sessionCount > 0) ? (agent.sessionCount + ' 会话') : ''].filter(Boolean).join(' · ');
                     var tokenLine = [];
-                    if (agent.totalTokens != null) tokenLine.push('当前 ' + formatTokenNumShort(agent.totalTokens));
-                    if (agent.cumulativeTokens != null && agent.cumulativeTokens > 0) tokenLine.push('累计 ' + formatTokenNumShort(agent.cumulativeTokens));
-                    if (agent.percentUsed != null) tokenLine.push('上下文 ' + agent.percentUsed + '%');
-                    var tokenBlock = tokenLine.length ? '<div class="text-[10px] text-slate-500 font-mono">' + tokenLine.join(' · ') + '</div>' : '';
+                    if (agent.totalTokens != null) tokenLine.push(formatTokenNumShort(agent.totalTokens));
+                    if (agent.cumulativeTokens != null && agent.cumulativeTokens > 0) tokenLine.push('Σ' + formatTokenNumShort(agent.cumulativeTokens));
+                    if (agent.percentUsed != null) tokenLine.push(agent.percentUsed + '%');
+                    var tokenStr = tokenLine.length ? tokenLine.join(' ') : '';
+                    var tokenTitle = '当前 ' + (agent.totalTokens != null ? formatTokenNumShort(agent.totalTokens) : '—') + ' · 累计 ' + (agent.cumulativeTokens != null ? formatTokenNumShort(agent.cumulativeTokens) : '—') + ' · 上下文 ' + (agent.percentUsed != null ? agent.percentUsed + '%' : '—');
                     card.innerHTML =
-                        '<div class="absolute top-0 left-0 w-full h-1 ' + (agent.color || 'bg-gray-500') + '"></div>' +
-                        '<div class="w-4 h-4 rounded-full status-dot ' + statusClass + '"></div>' +
-                        '<div class="text-center min-w-0">' +
-                        '<div class="text-sm font-bold text-white leading-tight">' + escapeHtml(agent.name || agent.id || '未知 Agent') + '</div>' +
-                        '<div class="text-[10px] text-slate-400 font-mono uppercase">' + escapeHtml(agent.id) + '</div>' +
-                        (modelDisplay ? '<div class="text-[10px] text-slate-500 font-mono truncate max-w-full" title="' + escapeHtml(agent.model || '') + '">' + modelDisplay + '</div>' : '') +
+                        '<div class="absolute top-0 left-0 right-0 h-0.5 rounded-t-xl ' + (agent.color || 'bg-gray-500') + '"></div>' +
+                        '<div class="agent-card-content pt-1.5">' +
+                        '<div class="flex items-center justify-center gap-1.5">' +
+                        '<div class="w-2.5 h-2.5 rounded-full status-dot shrink-0 ' + statusClass + '"></div>' +
+                        '<div class="text-xs font-bold text-white truncate min-w-0" title="' + escapeHtml(agent.name || agent.id || '') + '">' + escapeHtml(agent.name || agent.id || '未知') + '</div>' +
                         '</div>' +
-                        (channelTags ? '<div class="flex flex-wrap gap-1 justify-center">' + channelTags + '</div>' : '') +
-                        '<div class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
-                        (agent.sessionCount != null && agent.sessionCount > 0 ? '<div class="text-[10px] text-slate-500">' + agent.sessionCount + ' 会话</div>' : '') +
-                        tokenBlock +
-                        (agent.message ? '<div class="text-[10px] text-slate-500 truncate max-w-full text-center px-1">' + escapeHtml(agent.message) + '</div>' : '') +
-                        '<button type="button" class="memory-btn tap-target text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">读取记忆</button>';
+                        '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center">' + escapeHtml(agent.id) + '</div>' +
+                        (metaLine ? '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center" title="' + escapeHtml(agent.model || '') + '">' + metaLine + '</div>' : '') +
+                        (channelTags ? '<div class="flex flex-wrap gap-0.5 justify-center">' + channelTags + '</div>' : '') +
+                        '<div class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
+                        (tokenStr ? '<div class="text-[9px] text-slate-500 font-mono" title="' + escapeHtml(tokenTitle) + '">' + tokenStr + '</div>' : '') +
+                        (agent.message ? '<div class="text-[9px] text-slate-500 truncate w-full text-center" title="' + escapeHtml(agent.message) + '">' + escapeHtml(agent.message) + '</div>' : '') +
+                        '<button type="button" class="memory-btn tap-target text-[9px] px-1.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 mt-0.5" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">记忆</button>' +
+                        '</div>';
                     agentsContainer.appendChild(card);
                 });
             }
