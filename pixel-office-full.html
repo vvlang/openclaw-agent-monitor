@@ -6,13 +6,22 @@
     <title>像素办公室 · OpenClaw</title>
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; min-height: 100vh; background: #1e293b; color: #e2e8f0; font-family: ui-monospace, monospace; display: flex; flex-direction: column; align-items: center; padding: 0.5rem; }
-        .header { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 640px; margin-bottom: 0.5rem; }
+        body { margin: 0; min-height: 100vh; background: #1e293b; color: #e2e8f0; font-family: ui-monospace, monospace; display: flex; flex-direction: column; align-items: center; padding: 0.5rem; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+        .header { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 100%; padding: 0 0.25rem; margin-bottom: 0.25rem; }
         .header h1 { font-size: 0.95rem; font-weight: 700; margin: 0; }
         .header a { color: #94a3b8; text-decoration: none; font-size: 0.75rem; }
         .header a:hover { color: #e2e8f0; }
-        #game { display: block; background: #0f172a; border: 3px solid #334155; image-rendering: pixelated; image-rendering: crisp-edges; }
-        .footer { margin-top: 0.5rem; font-size: 10px; color: #64748b; }
+        #game-wrap { width: 100%; max-width: 100%; display: flex; justify-content: center; }
+        #game { display: block; background: #0f172a; border: 2px solid #334155; image-rendering: pixelated; image-rendering: crisp-edges; max-width: 100%; height: auto; }
+        #legend { padding: 0 0.25rem; }
+        .footer { margin-top: 0.25rem; font-size: 10px; color: #64748b; padding: 0 0.25rem; }
+        @media (max-width: 520px) {
+            body { padding: 0.5rem; padding-left: env(safe-area-inset-left, 0.5rem); padding-right: env(safe-area-inset-right, 0.5rem); }
+            .header h1 { font-size: 1rem; }
+            .header a { font-size: 0.85rem; }
+            #legend { font-size: 11px; gap: 6px; line-height: 1.4; }
+            .footer { font-size: 11px; }
+        }
     </style>
 </head>
 <body>
@@ -20,19 +29,27 @@
         <h1>🖥️ 像素办公室</h1>
         <a href="agent-dashboard.html">← 返回监控</a>
     </div>
-    <div id="legend" style="width:100%;max-width:640px;margin-bottom:4px;font-size:10px;color:#94a3b8;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
-    <canvas id="game" width="504" height="312"></canvas>
+    <div id="legend" style="width:100%;max-width:100%;margin-bottom:4px;font-size:10px;color:#94a3b8;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
+    <div id="game-wrap"><canvas id="game"></canvas></div>
     <div id="footer" class="footer">加载中…</div>
 
     <script>
 (function() {
     var DATA_FILE = 'agent-status.json';
     var REFRESH_MS = 8000;
-    var TILE_SIZE = 24;
-    var COLS = 21;
-    var ROWS = 13;
-    var CHAR_W = 20;
-    var CHAR_H = 28;
+    var isMobile = typeof window !== 'undefined' && window.innerWidth < 520;
+    var COLS = isMobile ? 11 : 21;
+    var ROWS = isMobile ? 19 : 13;
+    var TILE_SIZE;
+    if (isMobile) {
+        var pad = 24;
+        var w = typeof window !== 'undefined' ? window.innerWidth - pad : 360;
+        TILE_SIZE = Math.max(20, Math.floor(w / COLS));
+    } else {
+        TILE_SIZE = 24;
+    }
+    var CHAR_W = Math.round(TILE_SIZE * 0.83);
+    var CHAR_H = Math.round(TILE_SIZE * 1.17);
     var WALL = 0, FLOOR = 1;
     var DIR_DOWN = 0, DIR_LEFT = 1, DIR_RIGHT = 2, DIR_UP = 3;
     var WALK_SPEED = 48;
@@ -77,19 +94,34 @@
         seats.length = 0;
         blockedTiles.clear();
         decorations.length = 0;
-        var seatPositions = [{c:3,r:2},{c:7,r:2},{c:11,r:2},{c:15,r:2},{c:19,r:2},{c:3,r:6},{c:7,r:6},{c:11,r:6},{c:15,r:6},{c:19,r:6}];
-        seatPositions.forEach(function(p) {
-            blockedTiles.add(p.c + ',' + (p.r - 1));
-            if (p.c < COLS - 1) blockedTiles.add((p.c + 1) + ',' + (p.r - 1));
-            seats.push({ col: p.c, row: p.r, facing: DIR_UP });
-        });
-        decorations.push({ type: 'plant', col: 1, row: 1 });
-        decorations.push({ type: 'plant', col: COLS - 2, row: 1 });
-        decorations.push({ type: 'shelf', col: 2, row: ROWS - 3 });
-        decorations.push({ type: 'board', col: Math.floor(COLS / 2) - 1, row: 1 });
-        decorations.push({ type: 'sofa', col: COLS - 6, row: ROWS - 3 });
-        decorations.push({ type: 'coffee', col: Math.floor(COLS / 2) + 3, row: ROWS - 2 });
-        decorations.push({ type: 'cooler', col: Math.floor(COLS / 2) - 1, row: ROWS - 2 });
+        var seatPositions;
+        if (isMobile) {
+            seatPositions = [{c:2,r:2},{c:2,r:6},{c:2,r:10},{c:2,r:14},{c:6,r:2},{c:6,r:6},{c:6,r:10},{c:6,r:14}];
+            seatPositions.forEach(function(p) {
+                blockedTiles.add(p.c + ',' + (p.r - 1));
+                if (p.c < COLS - 1) blockedTiles.add((p.c + 1) + ',' + (p.r - 1));
+                seats.push({ col: p.c, row: p.r, facing: DIR_UP });
+            });
+            decorations.push({ type: 'plant', col: 1, row: 1 });
+            decorations.push({ type: 'plant', col: COLS - 2, row: 1 });
+            decorations.push({ type: 'board', col: 4, row: 1 });
+            decorations.push({ type: 'cooler', col: 5, row: ROWS - 2 });
+            decorations.push({ type: 'shelf', col: 2, row: ROWS - 4 });
+        } else {
+            seatPositions = [{c:3,r:2},{c:7,r:2},{c:11,r:2},{c:15,r:2},{c:19,r:2},{c:3,r:6},{c:7,r:6},{c:11,r:6},{c:15,r:6},{c:19,r:6}];
+            seatPositions.forEach(function(p) {
+                blockedTiles.add(p.c + ',' + (p.r - 1));
+                if (p.c < COLS - 1) blockedTiles.add((p.c + 1) + ',' + (p.r - 1));
+                seats.push({ col: p.c, row: p.r, facing: DIR_UP });
+            });
+            decorations.push({ type: 'plant', col: 1, row: 1 });
+            decorations.push({ type: 'plant', col: COLS - 2, row: 1 });
+            decorations.push({ type: 'shelf', col: 2, row: ROWS - 3 });
+            decorations.push({ type: 'board', col: Math.floor(COLS / 2) - 1, row: 1 });
+            decorations.push({ type: 'sofa', col: COLS - 6, row: ROWS - 3 });
+            decorations.push({ type: 'coffee', col: Math.floor(COLS / 2) + 3, row: ROWS - 2 });
+            decorations.push({ type: 'cooler', col: Math.floor(COLS / 2) - 1, row: ROWS - 2 });
+        }
         walkableTiles.length = 0;
         for (r = 1; r < ROWS - 1; r++)
             for (c = 1; c < COLS - 1; c++)
@@ -396,6 +428,8 @@
     }
 
     var canvas = document.getElementById('game');
+    canvas.width = COLS * TILE_SIZE;
+    canvas.height = ROWS * TILE_SIZE;
     var ctx = canvas.getContext('2d');
     var legendEl = document.getElementById('legend');
 
@@ -490,13 +524,15 @@
 
     function drawChatBubble(ch) {
         if (ch.chatBubbleTimer <= 0 || !ch.chatBubbleText) return;
-        var text = ch.chatBubbleText.length > 12 ? ch.chatBubbleText.slice(0, 10) + '…' : ch.chatBubbleText;
-        var bubbleY = ch.y - CHAR_H - 10;
-        var padding = 5;
-        ctx.font = '10px ui-monospace, monospace';
+        var maxLen = isMobile ? 14 : 12;
+        var text = ch.chatBubbleText.length > maxLen ? ch.chatBubbleText.slice(0, maxLen - 1) + '…' : ch.chatBubbleText;
+        var bubbleY = ch.y - CHAR_H - Math.round(TILE_SIZE * 0.4);
+        var padding = Math.max(4, Math.round(TILE_SIZE * 0.25));
+        var fontSize = Math.max(9, Math.round(TILE_SIZE * 0.5));
+        ctx.font = fontSize + 'px ui-monospace, monospace';
         var tw = ctx.measureText(text).width;
-        var bw = Math.min(tw + padding * 2, 140);
-        var bh = 16;
+        var bw = Math.min(tw + padding * 2, Math.round(TILE_SIZE * 6));
+        var bh = Math.round(TILE_SIZE * 0.75);
         var bx = ch.x - bw / 2;
         if (bx < 4) bx = 4;
         if (bx + bw > canvas.width - 4) bx = canvas.width - bw - 4;
@@ -515,14 +551,15 @@
 
     function drawBubble(ch) {
         if (!ch.isActive || ch.state !== 'type') return;
-        var text = ch.message || '工作中…';
-        if (text.length > 18) text = text.slice(0, 15) + '…';
-        var bubbleY = ch.y - CHAR_H - 8;
-        var padding = 6;
-        ctx.font = '11px ui-monospace, monospace';
+        var maxLen = isMobile ? 20 : 18;
+        var text = (ch.message || '工作中…').length > maxLen ? (ch.message || '工作中…').slice(0, maxLen - 3) + '…' : (ch.message || '工作中…');
+        var bubbleY = ch.y - CHAR_H - Math.round(TILE_SIZE * 0.35);
+        var padding = Math.max(5, Math.round(TILE_SIZE * 0.28));
+        var fontSize = Math.max(10, Math.round(TILE_SIZE * 0.48));
+        ctx.font = fontSize + 'px ui-monospace, monospace';
         var tw = ctx.measureText(text).width;
-        var bw = Math.min(tw + padding * 2, 180);
-        var bh = 20;
+        var bw = Math.min(tw + padding * 2, Math.round(TILE_SIZE * 7.5));
+        var bh = Math.round(TILE_SIZE * 0.85);
         var bx = ch.x - bw / 2;
         if (bx < 4) bx = 4;
         if (bx + bw > canvas.width - 4) bx = canvas.width - bw - 4;
@@ -548,23 +585,28 @@
         if (ch.state === 'type') scale = 0.95 + (ch.frame === 0 ? 0 : 0.06);
         ctx.scale(scale, scale);
         ctx.translate(-ch.x, -ch.y);
-        var bw = 12, bh = 10;
-        var ox = (CHAR_W - bw) / 2, oy = CHAR_H - 14;
+        var bw = Math.max(8, Math.round(CHAR_W * 0.6));
+        var bh = Math.max(6, Math.round(CHAR_H * 0.36));
+        var ox = (CHAR_W - bw) / 2, oy = CHAR_H - Math.round(CHAR_H * 0.5);
+        var headW = Math.round(bw * 0.7);
+        var headH = Math.round(CHAR_H * 0.36);
+        var eyeSz = Math.max(1, Math.floor(bw / 6));
         ctx.fillStyle = ch.color;
         ctx.fillRect(x + ox, y + oy, bw, bh);
         ctx.fillStyle = '#fef3c7';
-        ctx.fillRect(x + ox + 2, y + oy - 12, 8, 10);
+        ctx.fillRect(x + ox + Math.round((bw - headW) / 2), y + oy - headH, headW, headH);
         ctx.fillStyle = '#1e293b';
-        ctx.fillRect(x + ox + 4, y + oy - 10, 2, 2);
-        ctx.fillRect(x + ox + 8, y + oy - 10, 2, 2);
+        ctx.fillRect(x + ox + Math.round(bw * 0.25) - eyeSz / 2, y + oy - Math.round(headH * 0.6), eyeSz, eyeSz);
+        ctx.fillRect(x + ox + Math.round(bw * 0.75) - eyeSz / 2, y + oy - Math.round(headH * 0.6), eyeSz, eyeSz);
         if (ch.state === 'walk' && (ch.frame === 1 || ch.frame === 3)) {
             ctx.fillStyle = ch.color;
-            ctx.fillRect(x + ox - 2, y + oy + 6, 4, 4);
-            ctx.fillRect(x + ox + bw - 2, y + oy + 6, 4, 4);
+            var legSz = Math.max(2, Math.floor(bw / 4));
+            ctx.fillRect(x + ox - legSz / 2, y + oy + bh - 2, legSz, legSz);
+            ctx.fillRect(x + ox + bw - legSz / 2, y + oy + bh - 2, legSz, legSz);
         }
         if (ch.isActive && ch.state === 'type') {
             ctx.shadowColor = ch.color;
-            ctx.shadowBlur = 10;
+            ctx.shadowBlur = Math.max(6, TILE_SIZE / 2);
             ctx.fillStyle = ch.color;
             ctx.globalAlpha = 0.5;
             ctx.fillRect(x + ox, y + oy, bw, bh);
