@@ -1,0 +1,29 @@
+{
+  "byAgent": {
+    "main": {
+      "cumulativeTokens": 6614872,
+      "lastSessionId": "a0bc2f06-679a-4721-b11a-18b82f344a99",
+      "lastTotalTokens": 99630
+    },
+    "archivist": {
+      "cumulativeTokens": 750435,
+      "lastSessionId": "6bec3b5a-73c1-4097-80b0-faa33cfb405f",
+      "lastTotalTokens": 23885
+    },
+    "developer": {
+      "cumulativeTokens": 4732834,
+      "lastSessionId": "9d808865-b019-4a9a-8192-903b3701c63b",
+      "lastTotalTokens": 15032
+    },
+    "strategist": {
+      "cumulativeTokens": 897673,
+      "lastSessionId": "daeba52e-5c51-40d6-8414-3f4080f32cfd",
+      "lastTotalTokens": 19364
+    },
+    "tuyaya": {
+      "cumulativeTokens": 198811,
+      "lastSessionId": "e5237fa7-e81f-41b7-b8b1-2a1d8dbc68dd",
+      "lastTotalTokens": 63433
+    }
+  }
+}

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw 可视化图表 (独立窗口)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+            margin: 0;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h2 { text-align: center; color: #58a6ff; margin-bottom: 20px; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 15px;
+        }
+        .card h3 { margin-top: 0; color: #8b949e; font-size: 14px; }
+        .chart-container { position: relative; height: 250px; width: 100%; }
+        .status-bar {
+            text-align: center;
+            padding: 10px;
+            background: #21262d;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 12px;
+            color: #8b949e;
+        }
+        .error-badge {
+            background: rgba(248, 81, 73, 0.15);
+            color: #f85149;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            display: inline-block;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar" id="status-text">正在加载数据...</div>
+        
+        <div class="grid">
+            <!-- Agent 状态分布 -->
+            <div class="card">
+                <h3>🤖 Agent 状态分布</h3>
+                <div class="chart-container">
+                    <canvas id="agentChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Token 使用趋势 (模拟/预留) -->
+            <div class="card">
+                <h3>🪙 Token 使用 (当前会话)</h3>
+                <div class="chart-container">
+                    <canvas id="tokenChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 初始化图表 ---
+        const agentCtx = document.getElementById('agentChart').getContext('2d');
+        const tokenCtx = document.getElementById('tokenChart').getContext('2d');
+        
+        // 1. Agent 环形图
+        const agentChart = new Chart(agentCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['思考中', '空闲'],
+                datasets: [{
+                    data: [0, 0],
+                    backgroundColor: ['#d29922', '#8b949e'],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'right', labels: { color: '#8b949e' } } }
+            }
+        });
+
+        // 2. Token 柱状图 (当前会话)
+        const tokenChart = new Chart(tokenCtx, {
+            type: 'bar',
+            data: {
+                labels: ['当前会话'],
+                datasets: [{
+                    label: 'Token',
+                    data: [0],
+                    backgroundColor: '#3fb950',
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, grid: { color: '#30363d' }, ticks: { color: '#8b949e' } },
+                    x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }
+                }
+            }
+        });
+
+        // --- 数据获取逻辑 ---
+        async function fetchData() {
+            try {
+                const response = await fetch('agent-status.json?t=' + new Date().getTime());
+                if (!response.ok) throw new Error('Network response was not ok');
+                const data = await response.json();
+                updateCharts(data);
+            } catch (error) {
+                document.getElementById('status-text').innerHTML = `❌ 数据加载失败: ${error.message}`;
+                document.getElementById('status-text').style.color = '#f85149';
+            }
+        }
+
+        function updateCharts(data) {
+            const now = new Date().toLocaleTimeString();
+            let statusText = `✅ 数据已更新：${now}`;
+            
+            // 检查错误标记
+            if (data.error) {
+                statusText += ` <span class="error-badge">⚠️ 后端错误：${data.error.message}</span>`;
+                document.getElementById('status-text').style.color = '#f85149';
+            } else {
+                document.getElementById('status-text').style.color = '#8b949e';
+            }
+
+            document.getElementById('status-text').innerHTML = statusText;
+            
+            // 解析 Agent 数据
+            const agents = data.agents || [];
+            const thinking = agents.filter(a => a.status === 'thinking').length;
+            const idle = agents.length - thinking;
+            
+            // 更新 Agent 图表
+            agentChart.data.datasets[0].data = [thinking, idle];
+            agentChart.update();
+
+            // 更新 Token 数据 (从当前会话中获取)
+            // 如果没有会话数据，显示 0
+            let totalTokens = 0;
+            if (agents.length > 0 && agents[0].percentUsed != null) {
+                // 如果有第一个 agent 的会话，取其 token 数
+                totalTokens = agents[0].totalTokens || 0;
+            }
+            tokenChart.data.datasets[0].data = [totalTokens];
+            tokenChart.update();
+        }
+
+        // 启动
+        fetchData();
+        setInterval(fetchData, 5000); // 5 秒刷新
+    </script>
+</body>
+</html>

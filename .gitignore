@@ -1,8 +1,1 @@
-# 运行时生成，含本机路径等
-agent-status.json
-# 成本配置（可选，不提交则使用内置默认）
-model-pricing.json
-# Token 累计状态（持久化累计用 Token，不提交）
-token-cumulative-state.json
-# 系统文件
-.DS_Store
+# 敏感信息 (必须忽略) .env .openclaw/ .clawhub/ plugins/ # 系统文件 .DS_Store # 依赖 node_modules/ # 日志 *.log # 临时文件 *.tmp agent-status.json.backup # 构建产物 dist/ build/

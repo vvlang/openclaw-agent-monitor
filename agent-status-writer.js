@@ -721,6 +721,8 @@ function getMemoryForScopeAsync(scope) {
 async function updateStatus() {
   const status = await getStatusJson();
   if (!status) {
+    // 【修复 #2】命令失败时，标记错误但不覆盖旧数据
+    console.error('[writer] openclaw status 执行失败，标记错误状态');
     try {
       const prev = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
       prev.lastUpdated = new Date().toISOString();
@@ -728,9 +730,11 @@ async function updateStatus() {
       prev.gateway.reachable = false;
       prev.gateway.error = 'openclaw status 执行失败';
       prev.system = getSystemInfo();
-      if (!safeWriteStatusFile(prev)) {
-        // 写入锁被占用，跳过本轮，下一轮再写
-      }
+      prev.error = { message: 'Gateway status fetch failed', time: new Date().toISOString() };
+      // 原子写入
+      const tempFile = OUTPUT_FILE + '.tmp';
+      fs.writeFileSync(tempFile, JSON.stringify(prev, null, 2));
+      fs.renameSync(tempFile, OUTPUT_FILE);
     } catch (e) {
       console.warn('[writer] updateStatus read/write prev on status fail:', e.message || e);
     }
