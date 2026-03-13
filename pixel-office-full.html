@@ -3,16 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>像素办公室 · OpenClaw</title>
+    <title>三年二班 · OpenClaw</title>
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; min-height: 100vh; background: #1e293b; color: #e2e8f0; font-family: ui-monospace, monospace; display: flex; flex-direction: column; align-items: center; padding: 0.5rem; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+        body { margin: 0; min-height: 100vh; background: #e8e4de; color: #44403c; font-family: ui-monospace, monospace; display: flex; flex-direction: column; align-items: center; padding: 0.5rem; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
         .header { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 100%; padding: 0 0.25rem; margin-bottom: 0.25rem; }
         .header h1 { font-size: 0.95rem; font-weight: 700; margin: 0; }
         .header a { color: #94a3b8; text-decoration: none; font-size: 0.75rem; }
         .header a:hover { color: #e2e8f0; }
         #game-wrap { width: 100%; max-width: 100%; display: flex; justify-content: center; }
-        #game { display: block; background: #0f172a; border: 2px solid #334155; image-rendering: pixelated; image-rendering: crisp-edges; max-width: 100%; height: auto; }
+        #game { display: block; background: #d6d3d1; border: 2px solid #a8a29e; image-rendering: pixelated; image-rendering: crisp-edges; max-width: 100%; height: auto; }
         #legend { padding: 0 0.25rem; }
         .footer { margin-top: 0.25rem; font-size: 10px; color: #64748b; padding: 0 0.25rem; }
         @media (max-width: 520px) {
@@ -26,7 +26,7 @@
 </head>
 <body>
     <div class="header">
-        <h1>🖥️ 像素办公室</h1>
+        <h1>🏫 三年二班</h1>
         <a href="agent-dashboard.html">← 返回监控</a>
     </div>
     <div id="legend" style="width:100%;max-width:100%;margin-bottom:4px;font-size:10px;color:#94a3b8;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
@@ -96,31 +96,30 @@
         decorations.length = 0;
         var seatPositions;
         if (isMobile) {
-            seatPositions = [{c:2,r:2},{c:2,r:6},{c:2,r:10},{c:2,r:14},{c:6,r:2},{c:6,r:6},{c:6,r:10},{c:6,r:14}];
+            seatPositions = [{c:2,r:3},{c:2,r:7},{c:2,r:11},{c:2,r:15},{c:6,r:3},{c:6,r:7},{c:6,r:11},{c:6,r:15}];
             seatPositions.forEach(function(p) {
                 blockedTiles.add(p.c + ',' + (p.r - 1));
                 if (p.c < COLS - 1) blockedTiles.add((p.c + 1) + ',' + (p.r - 1));
                 seats.push({ col: p.c, row: p.r, facing: DIR_UP });
             });
-            decorations.push({ type: 'plant', col: 1, row: 1 });
-            decorations.push({ type: 'plant', col: COLS - 2, row: 1 });
-            decorations.push({ type: 'board', col: 4, row: 1 });
-            decorations.push({ type: 'cooler', col: 5, row: ROWS - 2 });
-            decorations.push({ type: 'shelf', col: 2, row: ROWS - 4 });
+            decorations.push({ type: 'blackboard', col: 3, row: 1 });
+            decorations.push({ type: 'classSign', col: 1, row: 1 });
+            decorations.push({ type: 'clock', col: COLS - 2, row: 1 });
+            decorations.push({ type: 'bookshelf', col: 2, row: ROWS - 4 });
+            decorations.push({ type: 'flag', col: 5, row: ROWS - 2 });
         } else {
-            seatPositions = [{c:3,r:2},{c:7,r:2},{c:11,r:2},{c:15,r:2},{c:19,r:2},{c:3,r:6},{c:7,r:6},{c:11,r:6},{c:15,r:6},{c:19,r:6}];
+            seatPositions = [{c:2,r:3},{c:6,r:3},{c:10,r:3},{c:14,r:3},{c:18,r:3},{c:2,r:7},{c:6,r:7},{c:10,r:7},{c:14,r:7},{c:18,r:7}];
             seatPositions.forEach(function(p) {
                 blockedTiles.add(p.c + ',' + (p.r - 1));
                 if (p.c < COLS - 1) blockedTiles.add((p.c + 1) + ',' + (p.r - 1));
                 seats.push({ col: p.c, row: p.r, facing: DIR_UP });
             });
-            decorations.push({ type: 'plant', col: 1, row: 1 });
-            decorations.push({ type: 'plant', col: COLS - 2, row: 1 });
-            decorations.push({ type: 'shelf', col: 2, row: ROWS - 3 });
-            decorations.push({ type: 'board', col: Math.floor(COLS / 2) - 1, row: 1 });
-            decorations.push({ type: 'sofa', col: COLS - 6, row: ROWS - 3 });
-            decorations.push({ type: 'coffee', col: Math.floor(COLS / 2) + 3, row: ROWS - 2 });
-            decorations.push({ type: 'cooler', col: Math.floor(COLS / 2) - 1, row: ROWS - 2 });
+            decorations.push({ type: 'blackboard', col: Math.floor(COLS / 2) - 1, row: 1 });
+            decorations.push({ type: 'classSign', col: 1, row: 1 });
+            decorations.push({ type: 'clock', col: COLS - 2, row: 1 });
+            decorations.push({ type: 'bookshelf', col: 2, row: ROWS - 3 });
+            decorations.push({ type: 'flag', col: Math.floor(COLS / 2) + 3, row: ROWS - 2 });
+            decorations.push({ type: 'flag', col: Math.floor(COLS / 2) - 1, row: ROWS - 2 });
         }
         walkableTiles.length = 0;
         for (r = 1; r < ROWS - 1; r++)
@@ -219,57 +218,123 @@
     }
 
     var CHAT_PAIRS = [
-        ['嗨！', '嘿～'],
-        ['在忙呢？', '没，溜达溜达'],
-        ['今天状态如何', '刚热身完'],
-        ['待会开会见', '好嘞'],
-        ['代码写得咋样了', '还行，调通了'],
-        ['你在看什么日志', '全是报错…'],
-        ['喝咖啡吗', '走啊'],
-        ['去续个热水', '顺便帮你带杯'],
-        ['今天天气不错', '是啊'],
-        ['工位好冷', '我带了毯子'],
-        ['有新需求吗', '刚接了一个'],
-        ['产品又改需求了', '习惯就好'],
-        ['回头聊', '嗯嗯'],
-        ['部署顺利吗', '手别抖就行'],
-        ['刚踩了个坑', '记得写到文档里'],
-        ['测试过了吗', '覆盖率还不错'],
-        ['CI 红了', '我去看下'],
-        ['今晚加班吗', '希望不用'],
-        ['要不要点奶茶', '算我一个'],
-        ['你负责哪个 Agent', '右边那位'],
-        ['网有点卡', '我也感到了'],
-        ['Gateway 稳吗', '刚才还绿着'],
-        ['刚重启了一下', '怪不得顺畅了'],
-        ['今天多少 Token 了', '不敢看…'],
-        ['日志写详细点', '以后骂自己少点'],
-        ['你在想啥', '在和用户斗智斗勇'],
-        ['有 Bug 呼我', '行，你别跑'],
-        ['模型好用吗', '偶尔发疯'],
-        ['回滚过了吗', '刚回完'],
-        ['要不要重构', '先活下来再说'],
-        ['记得写注释', '写到你看得懂'],
-        ['休息一会儿吧', '再跑一轮就歇'],
-        ['今天站会怎样', '大家都很诚实'],
-        ['需求文档看完没', '只看了标题'],
-        ['这个报错见过吗', '像老朋友了'],
-        ['又是新插件', '先别动我配置'],
-        ['你在查什么', '一个幽灵 Bug'],
-        ['上次的问题解决没', '被我驯服了'],
-        ['今天轮到谁值班', '好像是你'],
-        ['机器还顶得住吗', '风扇快起飞了'],
-        ['要不要拆分一下', 'Monolith 说不'],
-        ['多跑几条用例吧', '好，我加点边界'],
-        ['刚推上去吗', '对，我在看监控'],
-        ['出了问题喊我', '你别先下线'],
-        ['记得写 README', '下个我会感谢你'],
-        ['Token 烧得快吗', '像打火机一样'],
-        ['用户反馈咋样', '还挺喜欢的'],
-        ['要不要关灯', '再战一会儿'],
-        ['明天继续吧', '行，留点明天做'],
-        ['喝点水', '代码更好写'],
-        ['我们挺能打的', '那必须的']
+        ['作业写完了吗', '还差一点'],
+        ['借我橡皮', '给'],
+        ['下节什么课', '数学'],
+        ['老师来了', '快坐好'],
+        ['这道题你会吗', '我也不会'],
+        ['值日谁做', '好像是你'],
+        ['放学一起走', '好呀'],
+        ['午饭吃啥', '食堂呗'],
+        ['借支笔', '记得还'],
+        ['黑板抄完了吗', '差一行'],
+        ['今天几号', '自己看日历'],
+        ['考试难吗', '还行'],
+        ['笔记借我抄', '下课再说'],
+        ['窗户开一下', '冷'],
+        ['谁擦黑板', '轮到三组了'],
+        ['带红笔了吗', '有，给你'],
+        ['体育课下雨', '改自习了'],
+        ['班主任来了', '嘘'],
+        ['厕所在哪', '出门右转'],
+        ['几点了', '快下课了'],
+        ['这道题选啥', '选 C'],
+        ['你坐过去点', '挤死了'],
+        ['今天谁迟到', '小明'],
+        ['发卷子了', '我好慌'],
+        ['借我尺子', '别弄断'],
+        ['放学打球吗', '来'],
+        ['谁交作业', '小组长收'],
+        ['空调能开吗', '问老师'],
+        ['粉笔没了', '去领一盒'],
+        ['窗帘拉一下', '晒'],
+        ['背书背到哪', '第三段'],
+        ['默写了吗', '刚默完'],
+        ['今天大扫除', '我擦窗'],
+        ['谁带手机了', '不敢带'],
+        ['午休安静点', '知道了'],
+        ['红领巾戴好', '忘带了'],
+        ['升旗了', '快排队'],
+        ['眼保健操开始', '闭眼'],
+        ['谁在说话', '不是我'],
+        ['传一下本子', '往后传'],
+        ['这道题讲过吗', '上节课讲的'],
+        ['明天放假吗', '不放'],
+        ['春游去哪', '还没定'],
+        ['谁的书掉了', '我的'],
+        ['换座位了吗', '没听说'],
+        ['新来的转学生', '坐最后一排'],
+        ['班长呢', '去办公室了'],
+        ['班会主题是啥', '安全教育'],
+        ['谁没交钱', '问生活委员'],
+        ['课本借我', '别画'],
+        ['今天谁领读', '小红'],
+        ['听写错了几个', '五个'],
+        ['作文写多少字', '四百'],
+        ['实验课在哪', '实验室'],
+        ['音乐课带口琴', '忘了'],
+        ['美术要带啥', '彩笔'],
+        ['信息课去机房', '排队走'],
+        ['谁在吃零食', '收起来'],
+        ['水杯别放桌上', '会洒'],
+        ['书包放好', '挡过道了'],
+        ['谁踩我鞋', '对不起'],
+        ['笔盖还我', '给'],
+        ['橡皮掉了', '帮你捡'],
+        ['这道题答案多少', '自己算'],
+        ['老师说什么', '没听清'],
+        ['记作业了吗', '记了'],
+        ['明天穿校服', '知道了'],
+        ['谁在传纸条', '不是我'],
+        ['安静自习', '哦'],
+        ['同桌换一下', '为啥'],
+        ['你考多少分', '不告诉你'],
+        ['及格了吗', '刚好六十'],
+        ['谁第一名', '还是班长'],
+        ['卷子发了吗', '发了'],
+        ['错题改了吗', '改了'],
+        ['复习到哪了', '第二单元'],
+        ['明天测验', '又测'],
+        ['期中什么时候', '下下周'],
+        ['假期作业多吗', '一堆'],
+        ['暑假去哪玩', '在家写作业'],
+        ['新年快乐', '你也是'],
+        ['生日什么时候', '不告诉你'],
+        ['带糖了吗', '就一颗'],
+        ['谁在唱歌', '小声点'],
+        ['窗户关一下', '冷'],
+        ['灯谁关', '最后一个关'],
+        ['锁门了吗', '锁了'],
+        ['钥匙给谁', '值日生'],
+        ['明天见', '拜拜'],
+        ['路上小心', '你也是'],
+        ['作业别忘了', '记着呢'],
+        ['早点睡', '你也是'],
+        ['明天别迟到', '闹钟设好了'],
+        ['课本别忘带', '装好了'],
+        ['红笔借我改', '给'],
+        ['胶带有吗', '有'],
+        ['剪刀借一下', '小心用'],
+        ['谁有订书机', '老师有'],
+        ['固体胶呢', '传过去'],
+        ['这张纸多余', '给我打草稿'],
+        ['谁在折纸', '我'],
+        ['传话到哪了', '不知道'],
+        ['别告老师', '那你别吵'],
+        ['咱班最吵', '隔壁更吵'],
+        ['班主任凶吗', '看心情'],
+        ['数学老师好严', '严师出高徒'],
+        ['语文背不完', '一起背'],
+        ['英语听力难', '多听就好'],
+        ['科学实验好玩', '下次轮我'],
+        ['体育跑几圈', '三圈'],
+        ['美术画什么', '静物'],
+        ['音乐唱啥歌', '校歌'],
+        ['品德课看电影', '爽'],
+        ['综合课干啥', '做手工'],
+        ['自习写作业', '安静'],
+        ['放学别跑', '赶公交'],
+        ['一起回家吧', '好呀']
     ];
     var CHAT_DURATION = 3.5;
     var CHAT_COOLDOWN = 10;
@@ -436,20 +501,22 @@
     function drawTile(col, row, type) {
         var x = col * TILE_SIZE, y = row * TILE_SIZE;
         if (type === WALL) {
-            ctx.fillStyle = '#334155';
+            ctx.fillStyle = '#d4c4a8';
             ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-            ctx.strokeStyle = '#475569';
+            ctx.fillStyle = (col + row) % 2 === 0 ? '#c9b896' : '#ddceb4';
+            ctx.fillRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+            ctx.strokeStyle = '#a8a29e';
             ctx.lineWidth = 1;
             ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
             if (row === 0 && col > 2 && col < COLS - 3) {
-                ctx.fillStyle = '#475569';
+                ctx.fillStyle = '#78716c';
                 ctx.fillRect(x, y + TILE_SIZE / 2 - 2, TILE_SIZE, 4);
             }
         } else {
             var even = (col + row) % 2 === 0;
-            ctx.fillStyle = even ? '#1e293b' : '#0f172a';
+            ctx.fillStyle = even ? '#e7e5e4' : '#d6d3d1';
             ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-            ctx.fillStyle = even ? 'rgba(51,65,85,0.4)' : 'rgba(30,41,59,0.5)';
+            ctx.fillStyle = even ? 'rgba(168,162,158,0.2)' : 'rgba(120,113,108,0.15)';
             ctx.fillRect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
         }
     }
@@ -457,68 +524,79 @@
     function drawDesk(col, row) {
         var x = col * TILE_SIZE, y = row * TILE_SIZE;
         var w = TILE_SIZE * 2;
-        ctx.fillStyle = '#57534e';
-        ctx.fillRect(x, y, w, TILE_SIZE);
         ctx.fillStyle = '#78716c';
-        ctx.fillRect(x + 3, y + 3, w - 6, TILE_SIZE - 6);
-        ctx.fillStyle = '#44403c';
-        ctx.fillRect(x + 4, y + TILE_SIZE - 4, 6, 4);
-        ctx.fillRect(x + w - 10, y + TILE_SIZE - 4, 6, 4);
+        ctx.fillRect(x, y, w, TILE_SIZE);
+        ctx.fillStyle = '#a8a29e';
+        ctx.fillRect(x + 2, y + 2, w - 4, TILE_SIZE - 6);
+        ctx.fillStyle = '#57534e';
+        ctx.fillRect(x + 4, y + TILE_SIZE - 4, 8, 3);
+        ctx.fillRect(x + w - 12, y + TILE_SIZE - 4, 8, 3);
+        ctx.fillStyle = '#e7e5e4';
+        ctx.fillRect(x + 6, y + 4, w - 12, 6);
     }
 
     function drawDecoration(d) {
         var x = d.col * TILE_SIZE, y = d.row * TILE_SIZE;
-        if (d.type === 'plant') {
-            ctx.fillStyle = '#15803d';
-            ctx.fillRect(x + 8, y + 12, 8, 12);
-            ctx.fillStyle = '#22c55e';
-            ctx.fillRect(x + 6, y + 6, 12, 10);
-            ctx.fillStyle = '#a16207';
-            ctx.fillRect(x + 10, y + 18, 4, 6);
-        } else if (d.type === 'cooler') {
-            ctx.fillStyle = '#64748b';
-            ctx.fillRect(x + 4, y + 4, TILE_SIZE * 2 - 8, TILE_SIZE - 8);
-            ctx.fillStyle = '#94a3b8';
-            ctx.fillRect(x + 10, y + 8, 8, 12);
-            ctx.fillStyle = '#0ea5e9';
-            ctx.fillRect(x + 12, y + 10, 4, 6);
-        } else if (d.type === 'shelf') {
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(x, y, TILE_SIZE * 2, TILE_SIZE);
-            ctx.fillStyle = '#475569';
-            ctx.fillRect(x + 2, y + 3, TILE_SIZE * 2 - 4, 4);
-            ctx.fillRect(x + 2, y + 9, TILE_SIZE * 2 - 4, 4);
-            ctx.fillStyle = '#eab308';
-            ctx.fillRect(x + 4, y + 4, 6, 3);
-            ctx.fillStyle = '#38bdf8';
-            ctx.fillRect(x + 12, y + 10, 6, 3);
-        } else if (d.type === 'board') {
-            ctx.fillStyle = '#0f172a';
+        if (d.type === 'blackboard') {
+            ctx.fillStyle = '#1c1917';
             ctx.fillRect(x, y, TILE_SIZE * 3, TILE_SIZE);
-            ctx.strokeStyle = '#475569';
+            ctx.strokeStyle = '#57534e';
+            ctx.lineWidth = 2;
             ctx.strokeRect(x, y, TILE_SIZE * 3, TILE_SIZE);
-            ctx.fillStyle = '#e5e7eb';
-            ctx.fillRect(x + 4, y + 4, TILE_SIZE * 3 - 8, TILE_SIZE - 8);
-            ctx.fillStyle = '#94a3b8';
-            ctx.fillRect(x + 6, y + 6, TILE_SIZE * 3 - 12, 3);
-        } else if (d.type === 'sofa') {
-            ctx.fillStyle = '#7c2d12';
-            ctx.fillRect(x, y + 6, TILE_SIZE * 3, TILE_SIZE - 6);
-            ctx.fillStyle = '#b91c1c';
-            ctx.fillRect(x + 3, y + 8, TILE_SIZE * 3 - 6, TILE_SIZE - 10);
-            ctx.fillStyle = '#450a0a';
-            ctx.fillRect(x + 4, y + TILE_SIZE - 2, TILE_SIZE * 3 - 8, 2);
-        } else if (d.type === 'coffee') {
-            ctx.fillStyle = '#0f172a';
-            ctx.fillRect(x + 6, y + 10, TILE_SIZE - 12, 4);
-            ctx.fillStyle = '#e5e7eb';
-            ctx.fillRect(x + 9, y + 6, 6, 6);
-            ctx.fillStyle = '#78350f';
-            ctx.fillRect(x + 10, y + 7, 4, 4);
-            ctx.strokeStyle = '#e5e7eb';
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(x + 6, y + 6, 8, 4);
+            ctx.fillStyle = '#e7e5e4';
+            ctx.font = Math.round(TILE_SIZE * 0.35) + 'px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('1+1=?', x + TILE_SIZE * 1.5, y + TILE_SIZE / 2);
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+        } else if (d.type === 'classSign') {
+            ctx.fillStyle = '#fef3c7';
+            ctx.fillRect(x, y, TILE_SIZE * 2, TILE_SIZE);
+            ctx.strokeStyle = '#a16207';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x, y, TILE_SIZE * 2, TILE_SIZE);
+            ctx.fillStyle = '#1c1917';
+            ctx.font = 'bold ' + Math.round(TILE_SIZE * 0.5) + 'px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('三年二班', x + TILE_SIZE, y + TILE_SIZE / 2);
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+        } else if (d.type === 'clock') {
+            ctx.fillStyle = '#e7e5e4';
             ctx.beginPath();
-            ctx.arc(x + 16, y + 8, 3, 0, Math.PI * 2);
+            ctx.arc(x + TILE_SIZE / 2, y + TILE_SIZE / 2, TILE_SIZE / 2 - 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#57534e';
+            ctx.lineWidth = 2;
             ctx.stroke();
+            ctx.fillStyle = '#1c1917';
+            ctx.fillRect(x + TILE_SIZE / 2 - 1, y + 4, 2, 6);
+            ctx.fillRect(x + TILE_SIZE / 2 - 1, y + TILE_SIZE / 2 - 2, 2, 6);
+        } else if (d.type === 'bookshelf') {
+            ctx.fillStyle = '#78716c';
+            ctx.fillRect(x, y, TILE_SIZE * 2, TILE_SIZE);
+            ctx.fillStyle = '#57534e';
+            ctx.fillRect(x + 2, y + 2, TILE_SIZE * 2 - 4, 4);
+            ctx.fillRect(x + 2, y + 9, TILE_SIZE * 2 - 4, 4);
+            ctx.fillStyle = '#dc2626';
+            ctx.fillRect(x + 4, y + 4, 6, 3);
+            ctx.fillStyle = '#2563eb';
+            ctx.fillRect(x + 12, y + 4, 6, 3);
+            ctx.fillStyle = '#16a34a';
+            ctx.fillRect(x + 4, y + 11, 6, 3);
+            ctx.fillStyle = '#ca8a04';
+            ctx.fillRect(x + 12, y + 11, 6, 3);
+        } else if (d.type === 'flag') {
+            ctx.fillStyle = '#78716c';
+            ctx.fillRect(x + 2, y + 2, 2, TILE_SIZE - 4);
+            ctx.fillStyle = '#dc2626';
+            ctx.fillRect(x + 4, y + 4, TILE_SIZE - 6, (TILE_SIZE - 8) / 2);
+            ctx.fillStyle = '#fef3c7';
+            ctx.fillRect(x + 4, y + 4 + (TILE_SIZE - 8) / 2, TILE_SIZE - 6, (TILE_SIZE - 8) / 2);
         }
     }
 
@@ -618,7 +696,7 @@
 
     function render() {
         var w = canvas.width, h = canvas.height;
-        ctx.fillStyle = '#0f172a';
+        ctx.fillStyle = '#e7e5e4';
         ctx.fillRect(0, 0, w, h);
         var r, c;
         for (r = 0; r < ROWS; r++)
@@ -701,7 +779,7 @@
             }
         }
         var t = '共 ' + characters.length + ' 个 Agent';
-        if (characters.length > 0) t += ' · 工作中会走向工位，空闲时在办公室走动';
+        if (characters.length > 0) t += ' · 上课时会回到座位，下课时在教室走动';
         document.getElementById('footer').textContent = t;
     }
 
