@@ -139,6 +139,196 @@ function getGatewayReachableViaHealth() {
   });
 }
 
+/** 拉取 openclaw health --json，用于通道/聊天工具健康（per-channel probe summaries） */
+const HEALTH_CMD_TIMEOUT_MS = 12000;
+function getHealthJson() {
+  return new Promise((resolve) => {
+    let raw = '';
+    let resolved = false;
+    const child = spawn('openclaw', ['health', '--json'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      try {
+        child.kill('SIGKILL');
+      } catch (_) {}
+      resolve(null);
+    }, HEALTH_CMD_TIMEOUT_MS);
+    function tryParse() {
+      const start = raw.indexOf('{');
+      if (start === -1) return;
+      let depth = 0;
+      let end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        if (raw[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end === -1) return;
+      try {
+        const data = JSON.parse(raw.slice(start, end + 1));
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try {
+          child.kill('SIGKILL');
+        } catch (_) {}
+        resolve(data);
+      } catch (_) {}
+    }
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 512 * 1024) raw = raw.slice(-256 * 1024);
+      tryParse();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+    child.on('close', () => {
+      if (resolved) return;
+      tryParse();
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+  });
+}
+
+/** 拉取 openclaw models status --json，用于模型健康（可用性/鉴权） */
+function getModelsStatusJson() {
+  return new Promise((resolve) => {
+    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 10000);
+    let raw = '';
+    let resolved = false;
+    const child = spawn('openclaw', ['models', 'status', '--json'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      try {
+        child.kill('SIGKILL');
+      } catch (_) {}
+      resolve(null);
+    }, timeoutMs);
+    function tryParse() {
+      const start = raw.indexOf('{');
+      if (start === -1) return;
+      let depth = 0;
+      let end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        if (raw[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end === -1) return;
+      try {
+        const data = JSON.parse(raw.slice(start, end + 1));
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try {
+          child.kill('SIGKILL');
+        } catch (_) {}
+        resolve(data);
+      } catch (_) {}
+    }
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 512 * 1024) raw = raw.slice(-256 * 1024);
+      tryParse();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+    child.on('close', () => {
+      if (resolved) return;
+      tryParse();
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve(null);
+      }
+    });
+  });
+}
+
+/** 从 health JSON 中归一化出 channelHealth 数组（兼容多种字段名与嵌套结构） */
+function normalizeChannelHealthFromHealth(healthJson) {
+  if (!healthJson || typeof healthJson !== 'object') return [];
+  let list = healthJson.channels || healthJson.channelProbes || healthJson.probes || healthJson.probeResults || [];
+  if (!Array.isArray(list)) {
+    if (healthJson.channelSummary && Array.isArray(healthJson.channelSummary)) {
+      list = healthJson.channelSummary.map((ch) => (typeof ch === 'object' && ch != null) ? ch : { channel: ch, ok: true });
+    } else {
+      list = [];
+    }
+  }
+  if (list.length === 0) {
+    const keys = Object.keys(healthJson);
+    for (const k of keys) {
+      const v = healthJson[k];
+      if (Array.isArray(v) && v.length > 0 && v[0] && typeof v[0] === 'object' && (v[0].channel != null || v[0].name != null || v[0].id != null || v[0].type != null)) {
+        list = v;
+        break;
+      }
+    }
+  }
+  return list.map((item) => {
+    const channel = item.channel || item.name || item.id || item.type || item.channelType || 'unknown';
+    const ok = item.ok === true || item.healthy === true || item.connected === true || item.status === 'ok' || item.success === true;
+    const err = item.error || item.message || item.reason || (ok ? null : '探测失败');
+    const channelKey = String(channel).toLowerCase();
+    return { channel: channelKey, healthy: !!ok, error: err || null };
+  });
+}
+
+/** 从 models status JSON 中归一化出 modelHealth 数组 */
+function normalizeModelHealthFromModelsStatus(modelsJson) {
+  if (!modelsJson || typeof modelsJson !== 'object') return [];
+  const list = modelsJson.models || modelsJson.list || [];
+  if (!Array.isArray(list)) {
+    const defaultId = modelsJson.defaultModel || modelsJson.resolvedDefault;
+    if (defaultId) {
+      return [{ modelId: String(defaultId), available: true, error: null }];
+    }
+    return [];
+  }
+  return list.map((m) => {
+    const id = m.id || m.modelId || m.model || '';
+    const ok = m.available === true || m.healthy === true || (m.error == null && m.unavailable !== true);
+    return { modelId: String(id), available: !!ok, error: m.error || m.message || null };
+  });
+}
+
 /** Token 累计状态：按 Agent 记录上一会话 id/tokens，用于增量累加 */
 const TOKEN_CUMULATIVE_STATE_FILE = path.join(__dirname, 'token-cumulative-state.json');
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
@@ -792,29 +982,40 @@ async function updateStatus() {
     });
   }
 
-  // Token 累计：根据当前各 Agent 最近会话的 sessionId/totalTokens 做增量累加并持久化
-  let tokenState = { byAgent: {} };
+  // Token 累计：根据当前各 Agent 最近会话的 sessionId/totalTokens 做增量累加并持久化；同时按模型（modelId）累计
+  let tokenState = { byAgent: {}, byModel: {} };
   try {
     const raw = fs.readFileSync(TOKEN_CUMULATIVE_STATE_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.byAgent === 'object') tokenState.byAgent = parsed.byAgent;
+    if (parsed && typeof parsed.byModel === 'object') tokenState.byModel = parsed.byModel;
   } catch (_) {}
   const cumulativeByAgent = {};
   let tokenCumulativeGlobal = 0;
   agents.forEach((a) => {
     const sessionId = a.lastSessionId || null;
     const totalTokens = a.totalTokens != null ? Number(a.totalTokens) : 0;
+    const modelId = (a.model && typeof a.model === 'string' ? a.model.trim() : '') || 'unknown';
     let rec = tokenState.byAgent[a.id];
-    if (!rec) rec = { cumulativeTokens: 0, lastSessionId: null, lastTotalTokens: 0 };
+    if (!rec) rec = { cumulativeTokens: 0, lastSessionId: null, lastTotalTokens: 0, lastModelId: null };
+    if (rec.lastModelId == null) rec.lastModelId = null;
     if (sessionId != null && totalTokens >= 0) {
       if (rec.lastSessionId === sessionId) {
         const delta = totalTokens - rec.lastTotalTokens;
-        if (delta > 0) rec.cumulativeTokens += delta;
+        if (delta > 0) {
+          rec.cumulativeTokens += delta;
+          tokenState.byModel[modelId] = (tokenState.byModel[modelId] || 0) + delta;
+        }
         rec.lastTotalTokens = totalTokens;
       } else {
-        if (rec.lastSessionId != null) rec.cumulativeTokens += rec.lastTotalTokens;
+        if (rec.lastSessionId != null) {
+          rec.cumulativeTokens += rec.lastTotalTokens;
+          const lastModel = rec.lastModelId || 'unknown';
+          tokenState.byModel[lastModel] = (tokenState.byModel[lastModel] || 0) + rec.lastTotalTokens;
+        }
         rec.lastSessionId = sessionId;
         rec.lastTotalTokens = totalTokens;
+        rec.lastModelId = modelId;
       }
     }
     tokenState.byAgent[a.id] = rec;
@@ -830,6 +1031,20 @@ async function updateStatus() {
   agents.forEach((a) => {
     a.cumulativeTokens = cumulativeByAgent[a.id] != null ? cumulativeByAgent[a.id] : null;
   });
+
+  // 按模型（modelId）汇总当前与累计 Token：当前 = 各 Agent 当前会话归属到其当前模型；累计 = 按会话归属到当时使用的模型
+  const tokenByModelMap = {};
+  agents.forEach((a) => {
+    const modelId = (a.model && typeof a.model === 'string' ? a.model.trim() : '') || 'unknown';
+    if (!tokenByModelMap[modelId]) tokenByModelMap[modelId] = { modelId, current: 0, cumulative: tokenState.byModel[modelId] || 0 };
+    const cur = a.totalTokens != null ? Number(a.totalTokens) : 0;
+    tokenByModelMap[modelId].current += cur;
+  });
+  // 确保所有在 byModel 里出现过的模型都有行（即使当前没有 agent 在用）
+  Object.keys(tokenState.byModel || {}).forEach((mid) => {
+    if (!tokenByModelMap[mid]) tokenByModelMap[mid] = { modelId: mid, current: 0, cumulative: tokenState.byModel[mid] };
+  });
+  const tokenByModel = Object.values(tokenByModelMap).sort((a, b) => (b.cumulative || 0) - (a.cumulative || 0));
 
   let gateway = status.gateway
     ? {
@@ -860,6 +1075,32 @@ async function updateStatus() {
     if (probeOk) {
       gateway = { ...gateway, reachable: true, error: null };
       console.log('[writer] gateway 状态已由直连/health 探测修正为在线');
+    }
+  }
+
+  let channelHealth = [];
+  let modelHealth = [];
+  if (gateway.reachable) {
+    const [healthJson, modelsJson] = await Promise.all([getHealthJson(), getModelsStatusJson()]);
+    channelHealth = normalizeChannelHealthFromHealth(healthJson);
+    if (channelHealth.length === 0 && Array.isArray(status.channelSummary) && status.channelSummary.length > 0) {
+      channelHealth = status.channelSummary.map((ch) => {
+        const name = typeof ch === 'string' ? ch : (ch.name || ch.channel || ch.id || 'channel');
+        return { channel: String(name).toLowerCase(), healthy: true, error: null };
+      });
+    }
+    if (channelHealth.length === 0) {
+      const channelSet = new Set();
+      agents.forEach((a) => {
+        const arr = Array.isArray(a.boundChannels) ? a.boundChannels : [];
+        arr.forEach((c) => { if (c && typeof c === 'string') channelSet.add(String(c).toLowerCase()); });
+      });
+      channelHealth = Array.from(channelSet).map((c) => ({ channel: c, healthy: true, error: null }));
+    }
+    modelHealth = normalizeModelHealthFromModelsStatus(modelsJson);
+    if (modelHealth.length === 0) {
+      const modelIds = getModelIdsFromOpenClawConfig();
+      modelHealth = modelIds.map((id) => ({ modelId: id, available: true, error: null }));
     }
   }
 
@@ -903,11 +1144,14 @@ async function updateStatus() {
     gatewayService,
     controlUiUrl,
     channels: Array.isArray(status.channelSummary) ? status.channelSummary : [],
+    channelHealth,
+    modelHealth,
     sessionsTotal: (status.sessions && status.sessions.count) != null ? status.sessions.count : null,
     recentSessions,
     system,
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
     tokenCumulative: { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal },
+    tokenByModel,
     modelsSummary: getModelsSummaryFromConfig(),
     pluginsSummary: getPluginsSummaryFromConfig(),
   };
@@ -973,6 +1217,9 @@ const initial = {
   gateway: { reachable: false },
   gatewayService: null,
   channels: [],
+  channelHealth: [],
+  modelHealth: [],
+  tokenByModel: [],
   sessionsTotal: null,
   recentSessions: [],
   system: null,

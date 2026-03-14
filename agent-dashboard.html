@@ -30,8 +30,12 @@
         .sys-online { color: #22c55e; }
         .sys-offline { color: #64748b; }
         #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); max-height: 280px; overflow-y: auto; overflow-x: hidden; }
-        @media (min-width: 768px) { #agents-container { max-height: 320px; } }
         .agent-card { max-height: 280px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+        @media (min-width: 768px) {
+            .agent-cards-section { overflow: visible; }
+            #agents-container { max-height: none; overflow-y: visible; }
+            .agent-card { max-height: none; overflow: visible; }
+        }
         .agent-card-content { display: flex; flex-direction: column; gap: 0.35rem; align-items: center; min-width: 0; }
         .agent-token-bar { height: 4px; border-radius: 2px; background: #334155; overflow: hidden; width: 100%; max-width: 120px; }
         .agent-token-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease, background-color 0.2s; }
@@ -71,8 +75,9 @@
         @media (max-width: 768px) {
             body { min-height: 100vh; min-height: 100dvh; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; }
             .safe-area-padding { padding-left: env(safe-area-inset-left, 0); padding-right: env(safe-area-inset-right, 0); padding-top: env(safe-area-inset-top, 0); }
-            #agents-container { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; max-height: 260px; overflow-x: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.25rem; }
-            .agent-card { min-width: 0; padding: 0.5rem; max-height: 260px; }
+            .agent-cards-section { overflow: visible; min-height: 0; }
+            #agents-container { grid-template-columns: 1fr; gap: 0.75rem; max-height: none; overflow-x: hidden; overflow-y: visible; padding-bottom: 0.5rem; }
+            .agent-card { min-width: 0; width: 100%; padding: 0.75rem; max-height: none; overflow: visible; }
         }
         /* CDN 不可用时的备用布局，避免页面完全错乱 */
         .flex { display: flex; }
@@ -91,6 +96,9 @@
         .overflow-auto { overflow: auto; }
         .overflow-hidden { overflow: hidden; }
         .grid { display: grid; }
+        .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+        @media (min-width: 768px) { .md\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        .gap-3 { gap: 0.75rem; }
     </style>
 </head>
 <body class="min-h-screen overflow-y-auto md:h-screen md:overflow-hidden flex flex-col">
@@ -138,8 +146,8 @@
         </div>
     </header>
 
-    <section class="bg-slate-800/80 border-b border-slate-700 px-3 md:px-6 py-2 shrink-0 overflow-hidden flex flex-col min-h-0" aria-label="Agent 卡片">
-        <div id="agents-container" class="gap-3 max-h-[280px] md:max-h-[320px] overflow-y-auto overflow-x-hidden scroll-touch">
+    <section class="agent-cards-section bg-slate-800/80 border-b border-slate-700 px-3 md:px-6 py-2 shrink-0 overflow-hidden flex flex-col min-h-0" aria-label="Agent 卡片">
+        <div id="agents-container" class="gap-3 max-h-[280px] overflow-y-auto overflow-x-hidden scroll-touch">
             <div class="col-span-full text-center py-6 text-slate-500">
                 <div class="inline-block animate-spin mr-2">⟳</div>
                 正在连接监控服务...
@@ -160,6 +168,13 @@
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">Token 统计</h2>
                 <div id="token-stats" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按模型）</h2>
+                <div id="token-by-model" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
                     <div class="text-slate-600 italic">等待数据...</div>
                 </div>
             </div>
@@ -367,9 +382,9 @@
 
         function formatTokenNum(n) {
             if (n == null) return '--';
-            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-            return String(n);
+            var millions = n / 1000000;
+            if (millions < 0.01 && n > 0) return '<0.01 百万';
+            return millions.toFixed(2) + ' 百万';
         }
 
         function renderTokenStats(data) {
@@ -397,6 +412,36 @@
             tokenStatsEl.innerHTML =
                 (summary.length ? '<div class="text-slate-300 mb-2">' + summary.join(' · ') + '</div>' : '') +
                 (rows ? '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">Agent</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 pr-2 text-right">累计</th><th class="py-0.5 text-right">上下文</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="text-slate-600 italic">暂无 Agent 数据</div>');
+        }
+
+        var providerLabels = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', gemini: 'Google', deepseek: 'DeepSeek', moonshot: '月之暗面', zhipu: '智谱', baidu: '百度', aliyun: '阿里云', tencent: '腾讯', minimax: 'MiniMax', doubao: '豆包', qwen: '通义千问', stepfun: '阶跃星辰', groq: 'Groq', together: 'Together', mistral: 'Mistral', cohere: 'Cohere' };
+        function modelDisplayName(modelId) {
+            if (!modelId || modelId === 'unknown') return modelId || '—';
+            var idx = modelId.indexOf('/');
+            var short = idx >= 0 ? modelId.slice(idx + 1) : modelId;
+            var provider = idx >= 0 ? modelId.slice(0, idx).toLowerCase() : '';
+            var label = providerLabels[provider] || (provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : '');
+            return label ? label + ' · ' + short : short;
+        }
+        function renderTokenByModel(data) {
+            var el = document.getElementById('token-by-model');
+            if (!el) return;
+            var list = data.tokenByModel;
+            if (!list || !list.length) {
+                el.innerHTML = '<div class="text-slate-600 italic">暂无按模型汇总数据</div>';
+                return;
+            }
+            var rows = list.map(function (m) {
+                var label = modelDisplayName(m.modelId);
+                var cur = formatTokenNum(m.current);
+                var cum = formatTokenNum(m.cumulative);
+                return '<tr class="border-b border-slate-700/50">' +
+                    '<td class="py-0.5 pr-2" title="' + escapeHtml(m.modelId) + '">' + escapeHtml(label) + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right" title="当前会话合计">' + cur + '</td>' +
+                    '<td class="py-0.5 text-right text-amber-400/90" title="累计（按会话归属到当时使用的模型）">' + cum + '</td>' +
+                    '</tr>';
+            }).join('');
+            el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 text-right">累计</th></tr></thead><tbody>' + rows + '</tbody></table>';
         }
 
         function renderModelsSummary(data) {
@@ -679,10 +724,19 @@
                 var channelLabels = { telegram: 'TG', imessage: 'iMsg', dingtalk: '钉钉', discord: 'DC', feishu: '飞书', slack: 'Slack', webchat: 'Web' };
                 function formatTokenNumShort(n) {
                     if (n == null) return '—';
-                    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-                    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
-                    return String(n);
+                    var millions = n / 1000000;
+                    if (millions < 0.01 && n > 0) return '<0.01 百万';
+                    return (millions >= 1 ? millions.toFixed(1) : millions.toFixed(2)) + ' 百万';
                 }
+                var channelHealthList = Array.isArray(data.channelHealth) ? data.channelHealth : [];
+                var modelHealthList = Array.isArray(data.modelHealth) ? data.modelHealth : [];
+                var channelHealthy = {};
+                channelHealthList.forEach(function (x) {
+                    var key = (x.channel && typeof x.channel === 'string') ? x.channel.toLowerCase() : '';
+                    if (key) channelHealthy[key] = x.healthy;
+                });
+                var modelAvailable = {};
+                modelHealthList.forEach(function (x) { modelAvailable[x.modelId] = x.available; });
                 agents.forEach(function (agent) {
                     var statusClass = getStatusClass(agent.status);
                     var isThinking = agent.status === 'thinking';
@@ -690,12 +744,25 @@
                     card.className = 'agent-card rounded-xl p-2.5 flex flex-col relative' + (isThinking ? ' thinking' : '');
                     var modelName = (agent.model && agent.model.trim()) ? (agent.model.indexOf('/') >= 0 ? agent.model.split('/').pop() : agent.model) : '';
                     var modelDisplay = modelName ? escapeHtml(modelName) : '';
+                    var modelPart = modelDisplay;
+                    if (modelPart && modelHealthList.length > 0 && agent.model) {
+                        var avail = modelAvailable[agent.model];
+                        if (avail === true) modelPart = '<span class="text-green-400" title="模型可用">●</span> ' + modelPart;
+                        else if (avail === false) modelPart = '<span class="text-red-400" title="模型不可用">●</span> ' + modelPart;
+                    }
                     var channels = agent.boundChannels || [];
                     var channelTags = channels.map(function (ch) {
                         var label = channelLabels[ch] || ch;
-                        return '<span class="px-1 py-0.5 rounded text-[9px] bg-slate-700/80 text-slate-300" title="' + escapeHtml(ch) + '">' + escapeHtml(label) + '</span>';
+                        var key = (ch && typeof ch === 'string') ? ch.toLowerCase() : '';
+                        var ok = channelHealthList.length > 0 && key ? channelHealthy[key] : undefined;
+                        var boxCls = 'px-1 py-0.5 rounded text-[9px] inline-flex items-center border ';
+                        if (ok === true) boxCls += 'bg-green-900/50 border-green-600/60 text-green-200';
+                        else if (ok === false) boxCls += 'bg-red-900/50 border-red-600/60 text-red-200';
+                        else boxCls += 'bg-slate-700/80 border-slate-600/60 text-slate-300';
+                        var title = (ok === true ? '通道正常 · ' : ok === false ? '通道异常 · ' : '') + ch;
+                        return '<span class="' + boxCls + '" title="' + escapeHtml(title) + '">' + escapeHtml(label) + '</span>';
                     }).join('');
-                    var metaLine = [modelDisplay, (agent.sessionCount != null && agent.sessionCount > 0) ? (agent.sessionCount + ' 会话') : ''].filter(Boolean).join(' · ');
+                    var metaLine = [modelPart, (agent.sessionCount != null && agent.sessionCount > 0) ? (agent.sessionCount + ' 会话') : ''].filter(Boolean).join(' · ');
                     var tokenLine = [];
                     if (agent.totalTokens != null) tokenLine.push(formatTokenNumShort(agent.totalTokens));
                     if (agent.cumulativeTokens != null && agent.cumulativeTokens > 0) tokenLine.push('Σ' + formatTokenNumShort(agent.cumulativeTokens));
@@ -735,6 +802,7 @@
 
             renderGateway(data);
             renderTokenStats(data);
+            renderTokenByModel(data);
             renderModelsSummary(data);
             renderPluginsSummary(data);
             renderRecentSessions(data);
