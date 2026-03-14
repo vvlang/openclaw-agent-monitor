@@ -3,7 +3,7 @@
  * 数据源：openclaw status --json，自动发现并监控配置中的全部 Agent。
  */
 
-const { execSync, exec, spawn } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -13,9 +13,22 @@ const url = require('url');
 
 /** Gateway 直连探测超时（毫秒），当 status 报离线时用此探测修正 */
 const GATEWAY_PROBE_TIMEOUT_MS = 3000;
-/** 当 status 未提供 gateway.url 时使用的备用 URL（OpenClaw 默认端口 18789） */
+/** Gateway 探测结果缓存时间（毫秒），此时间内不重复探测，避免在线/离线来回跳 */
+const GATEWAY_PROBE_CACHE_MS = Math.max(10000, parseInt(process.env.OPENCLAW_MONITOR_GATEWAY_CACHE_MS || '60000', 10) || 60000);
+/** 当 status 未提供 gateway.url 或探测失败时使用的 URL；未设置环境变量时等价于 curl http://127.0.0.1:18789 */
 const GATEWAY_FALLBACK_URL = process.env.OPENCLAW_MONITOR_GATEWAY_URL || 'http://127.0.0.1:18789';
 const OUTPUT_FILE = path.join(__dirname, 'agent-status.json');
+
+/** 最近一次 Gateway 探测结果：缓存期内直接复用，避免每次刷新都探测导致状态来回跳 */
+let gatewayProbeCache = { reachable: null, displayUrl: null, at: 0 };
+
+/** 全局串行队列：同一时刻只运行一个 openclaw 子进程（status/health/models/plugins），避免进程爆炸 */
+let openclawQueue = Promise.resolve();
+function withOpenClawQueue(fn) {
+  const next = openclawQueue.then(() => fn()).catch((e) => { throw e; });
+  openclawQueue = next.catch(() => {});
+  return next;
+}
 
 /** 将 ws/wss URL 转为 http/https，供 Control UI 链接使用（浏览器打开需 http） */
 function toHttpUrl(anyUrl) {
@@ -28,48 +41,89 @@ function toHttpUrl(anyUrl) {
 const COST_CONFIG_FILE = path.join(__dirname, 'model-pricing.json');
 
 /**
- * 直连请求 gateway URL，用于在 status 报离线时做一次备用检测（避免插件/超时导致误报）
- * @param {string} gatewayUrl - 如 http://127.0.0.1:18789
+ * 将任意 gateway URL 规范为可用于 curl 的 http(s) 地址（ws/wss 转为 http/https，补默认端口）
+ */
+function normalizeProbeUrl(gatewayUrl) {
+  if (!gatewayUrl || typeof gatewayUrl !== 'string') return null;
+  let s = gatewayUrl.trim();
+  if (s.startsWith('ws://')) s = 'http://' + s.slice(5);
+  else if (s.startsWith('wss://')) s = 'https://' + s.slice(6);
+  let parsed;
+  try {
+    parsed = url.parse(s);
+  } catch (_) {
+    return null;
+  }
+  if (!parsed.hostname) return null;
+  let port = parsed.port;
+  if (!port && (parsed.protocol === 'https:' || s.startsWith('https://'))) port = 443;
+  if (!port && (parsed.protocol === 'http:' || s.startsWith('http://'))) port = 80;
+  if (!port) port = 18789;
+  const protocol = (parsed.protocol === 'https:' || s.startsWith('https://')) ? 'https:' : 'http:';
+  const path = (parsed.pathname && parsed.pathname !== '/') ? parsed.pathname : '';
+  const portPart = (port === 80 && protocol === 'http:') || (port === 443 && protocol === 'https:') ? '' : (':' + port);
+  return protocol + '//' + parsed.hostname + portPart + path;
+}
+
+/**
+ * 用 curl 直连请求 gateway URL 确认状态（等价于 curl -s -k <url>，默认即 curl http://127.0.0.1:18789）
+ * @param {string} gatewayUrl - 如 http://127.0.0.1:18789 或 https://mac-mini.tail365b.ts.net
  * @returns {Promise<boolean>}
  */
 function probeGatewayUrl(gatewayUrl) {
-  if (!gatewayUrl || typeof gatewayUrl !== 'string') return Promise.resolve(false);
+  const urlToProbe = normalizeProbeUrl(gatewayUrl);
+  if (!urlToProbe) return Promise.resolve(false);
   return new Promise((resolve) => {
-    let parsed;
-    try {
-      parsed = url.parse(gatewayUrl);
-    } catch (_) {
-      resolve(false);
-      return;
-    }
-    const protocol = parsed.protocol === 'https:' ? https : http;
-    const pathToUse = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '/';
-    const opts = {
-      hostname: parsed.hostname,
-      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-      path: pathToUse,
-      method: 'GET',
-      timeout: GATEWAY_PROBE_TIMEOUT_MS,
-    };
-    const req = protocol.get(opts, (res) => {
-      resolve(res.statusCode >= 200 && res.statusCode < 500);
-      res.resume();
+    const timeoutSec = Math.max(1, Math.ceil(GATEWAY_PROBE_TIMEOUT_MS / 1000));
+    const args = [
+      '-s', '-k',
+      '-o', os.platform() === 'win32' ? 'NUL' : '/dev/null',
+      '-w', '%{http_code}',
+      '--connect-timeout', String(timeoutSec),
+      '--max-time', String(timeoutSec + 2),
+      urlToProbe,
+    ];
+    const child = spawn('curl', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
     });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => {
-      req.destroy();
+    let out = '';
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (_) {}
+      if (process.env.OPENCLAW_MONITOR_GATEWAY_DEBUG === '1') {
+        console.warn('[writer] probeGatewayUrl curl timeout', urlToProbe);
+      }
+      resolve(false);
+    }, GATEWAY_PROBE_TIMEOUT_MS + 2000);
+    child.stdout.on('data', (chunk) => { out += chunk.toString('utf-8'); });
+    child.stderr.on('data', () => {});
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      if (process.env.OPENCLAW_MONITOR_GATEWAY_DEBUG === '1') {
+        console.warn('[writer] probeGatewayUrl curl error', urlToProbe, err.message || err);
+      }
       resolve(false);
     });
-    req.setTimeout(GATEWAY_PROBE_TIMEOUT_MS);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const codeStr = out.trim();
+      const num = parseInt(codeStr, 10);
+      const ok = !isNaN(num) && num >= 200 && num < 500;
+      if (!ok && process.env.OPENCLAW_MONITOR_GATEWAY_DEBUG === '1') {
+        console.warn('[writer] probeGatewayUrl curl', urlToProbe, 'code', code, 'http', codeStr);
+      }
+      resolve(ok);
+    });
   });
 }
 
 /**
- * 通过 openclaw health --json 判断 Gateway 是否可达（该命令向运行中的 Gateway 请求健康快照）
+ * 通过 openclaw health --json 判断 Gateway 是否可达，并返回健康 JSON 供复用（少一次 spawn）。
  * 使用 spawn + 读完整 JSON 后 kill，避免插件导致进程不退出。
- * @returns {Promise<boolean>}
+ * @returns {Promise<{ reachable: boolean, healthJson: object|null }>}
  */
-function getGatewayReachableViaHealth() {
+function getGatewayReachableViaHealthImpl() {
   return new Promise((resolve) => {
     const timeoutMs = Math.min(20000, Math.max(5000, GATEWAY_PROBE_TIMEOUT_MS * 2));
     let raw = '';
@@ -85,7 +139,7 @@ function getGatewayReachableViaHealth() {
       try {
         child.kill('SIGKILL');
       } catch (_) {}
-      resolve(false);
+      resolve({ reachable: false, healthJson: null });
     }, timeoutMs);
     function tryParse() {
       const start = raw.indexOf('{');
@@ -104,14 +158,14 @@ function getGatewayReachableViaHealth() {
       }
       if (end === -1) return;
       try {
-        JSON.parse(raw.slice(start, end + 1));
+        const healthJson = JSON.parse(raw.slice(start, end + 1));
         if (resolved) return;
         resolved = true;
         clearTimeout(timer);
         try {
           child.kill('SIGKILL');
         } catch (_) {}
-        resolve(true);
+        resolve({ reachable: true, healthJson });
       } catch (_) {}
     }
     child.stdout.on('data', (chunk) => {
@@ -124,7 +178,7 @@ function getGatewayReachableViaHealth() {
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
-        resolve(false);
+        resolve({ reachable: false, healthJson: null });
       }
     });
     child.on('close', () => {
@@ -133,15 +187,18 @@ function getGatewayReachableViaHealth() {
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
-        resolve(false);
+        resolve({ reachable: false, healthJson: null });
       }
     });
   });
 }
+function getGatewayReachableViaHealth() {
+  return withOpenClawQueue(getGatewayReachableViaHealthImpl);
+}
 
 /** 拉取 openclaw health --json，用于通道/聊天工具健康（per-channel probe summaries） */
 const HEALTH_CMD_TIMEOUT_MS = 12000;
-function getHealthJson() {
+function getHealthJsonImpl() {
   return new Promise((resolve) => {
     let raw = '';
     let resolved = false;
@@ -209,9 +266,12 @@ function getHealthJson() {
     });
   });
 }
+function getHealthJson() {
+  return withOpenClawQueue(getHealthJsonImpl);
+}
 
 /** 拉取 openclaw models status --json，用于模型健康（可用性/鉴权） */
-function getModelsStatusJson() {
+function getModelsStatusJsonImpl() {
   return new Promise((resolve) => {
     const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 10000);
     let raw = '';
@@ -279,6 +339,9 @@ function getModelsStatusJson() {
       }
     });
   });
+}
+function getModelsStatusJson() {
+  return withOpenClawQueue(getModelsStatusJsonImpl);
 }
 
 /** 从 health JSON 中归一化出 channelHealth 数组（兼容多种字段名与嵌套结构） */
@@ -415,6 +478,44 @@ function getAgentModelFromOpenClawConfig() {
   return out;
 }
 
+/** 从 OpenClaw 配置按协作圈（subagents.allowAgents）计算每个 Agent 的分组：归属到「在 allowAgents 中包含该 agent」的主 agent 所对应的组 */
+function getAgentGroupFromOpenClawConfig() {
+  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (_) {
+    try {
+      raw = fs.readFileSync(fallbackPath, 'utf-8');
+    } catch (__) {
+      return {};
+    }
+  }
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (_) {
+    return {};
+  }
+  const out = {};
+  const agentList = config.agents && config.agents.list;
+  if (!Array.isArray(agentList)) return out;
+  for (const a of agentList) {
+    if (!a || !a.id) continue;
+    const allow = a.subagents && a.subagents.allowAgents;
+    if (!Array.isArray(allow)) continue;
+    const circleName = (a.name && String(a.name).trim()) || a.id;
+    if (!out[a.id]) out[a.id] = circleName;
+    for (const id of allow) {
+      if (id == null || String(id) === '*') continue;
+      const sid = String(id).trim();
+      if (sid && !out[sid]) out[sid] = circleName;
+    }
+  }
+  return out;
+}
+
 /** 从 OpenClaw 配置读取每个 Agent 绑定的通道（bindings[].agentId + match.channel），用于仪表盘展示对接的聊天工具 */
 function getAgentChannelsFromConfig() {
   const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
@@ -493,7 +594,94 @@ function getModelsSummaryFromConfig() {
   return list;
 }
 
-/** 从 OpenClaw 配置读取插件/技能摘要（plugins.entries + skills.entries，用于仪表盘「插件/技能」） */
+/** 运行 openclaw <args> 并从 stdout 解析 JSON（跳过 [plugins] 等日志行，从第一个 { 起匹配括号） */
+function runOpenClawJsonCommandImpl(args) {
+  return new Promise((resolve) => {
+    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 20000);
+    let raw = '';
+    let resolved = false;
+    const child = spawn('openclaw', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+      resolve(null);
+    }, timeoutMs);
+    function tryParse() {
+      const start = raw.indexOf('{');
+      if (start === -1) return;
+      let depth = 0;
+      let end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        if (raw[i] === '}') {
+          depth--;
+          if (depth === 0) { end = i; break; }
+        }
+      }
+      if (end === -1) return;
+      try {
+        const data = JSON.parse(raw.slice(start, end + 1));
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try { child.kill('SIGKILL'); } catch (_) {}
+        resolve(data);
+      } catch (_) {}
+    }
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 1024 * 1024) raw = raw.slice(-512 * 1024);
+      tryParse();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => {
+      if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); }
+    });
+    child.on('close', () => {
+      if (resolved) return;
+      tryParse();
+      if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); }
+    });
+  });
+}
+function runOpenClawJsonCommand(args) {
+  return withOpenClawQueue(() => runOpenClawJsonCommandImpl(args));
+}
+
+/** 从 openclaw plugins list --json / skills list --json 获取完整插件与技能列表（用于仪表盘「插件/技能」） */
+function getPluginsSummaryFromCli() {
+  return Promise.all([
+    runOpenClawJsonCommand(['plugins', 'list', '--json']),
+    runOpenClawJsonCommand(['skills', 'list', '--json']),
+  ]).then(([pluginsOut, skillsOut]) => {
+    const pluginsEnabled = [];
+    const pluginsDisabled = [];
+    const pl = pluginsOut && Array.isArray(pluginsOut.plugins) ? pluginsOut.plugins : [];
+    for (const p of pl) {
+      const id = p.id || p.name || '';
+      if (!id) continue;
+      if (p.enabled === true) pluginsEnabled.push(id);
+      else pluginsDisabled.push(id);
+    }
+    const skillsEnabled = [];
+    const skillsDisabled = [];
+    const sl = skillsOut && Array.isArray(skillsOut.skills) ? skillsOut.skills : [];
+    for (const s of sl) {
+      const name = s.name || s.id || '';
+      if (!name) continue;
+      if (s.disabled === true) skillsDisabled.push(name);
+      else skillsEnabled.push(name);
+    }
+    return { plugins: { enabled: pluginsEnabled, disabled: pluginsDisabled }, skills: { enabled: skillsEnabled, disabled: skillsDisabled } };
+  }).catch(() => null);
+}
+
+/** 从 OpenClaw 配置读取插件/技能摘要（plugins.entries + skills.entries，CLI 不可用时的回退） */
 function getPluginsSummaryFromConfig() {
   const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
   const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
@@ -555,6 +743,8 @@ const REDACT_PATHS = process.env.OPENCLAW_MONITOR_REDACT_PATHS === '1'; // 为 1
 const MEMORY_ENABLED = process.env.OPENCLAW_MONITOR_NO_MEMORY !== '1'; // 为 1 时关闭角色记忆拉取
 const MEMORY_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_MEMORY_INTERVAL_MS || '30000', 10) || 30000; // 角色记忆单独轮询间隔，默认 30s，避免阻塞主轮询
 const MEMORY_LIMIT = Math.min(100, Math.max(5, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_LIMIT || '30', 10) || 30)); // 每个 scope 最多拉取条数
+/** 同时拉取记忆的 scope 数量上限，避免多 Agent 时并发 openclaw 进程爆炸 */
+const MEMORY_CONCURRENCY = Math.min(10, Math.max(1, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_CONCURRENCY || '2', 10) || 2));
 const MEMORY_TEXT_LEN = 200; // 每条记忆预览最大字符，超出截断
 
 // 按索引循环使用，支持任意数量 Agent
@@ -729,7 +919,7 @@ function getSystemInfo() {
  * 避免在安装插件（如 openclaw-self-healing）后 CLI 加载插件导致进程不退出、execSync 超时无数据。
  * @see https://github.com/openclaw/openclaw/issues/11843
  */
-function getStatusJson() {
+function getStatusJsonImpl() {
   return new Promise((resolve) => {
     const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 15000);
     let raw = '';
@@ -801,11 +991,17 @@ function getStatusJson() {
     });
   });
 }
+function getStatusJson() {
+  return withOpenClawQueue(getStatusJsonImpl);
+}
 
 /** 解析 memory-pro list 的 stdout 为条目数组（首行可能是 [plugins]...，需从换行后的 [ 开始） */
 const MEMORY_DEBUG = process.env.OPENCLAW_MONITOR_MEMORY_DEBUG === '1';
 /** scope 最大长度，防止超长输入导致 DoS；与 GET /memory?scope= 校验一致 */
 const MEMORY_SCOPE_MAX_LENGTH = 128;
+/** GET /memory 响应缓存 TTL（毫秒），减少重复点击/多 Agent 时的 openclaw 进程数 */
+const MEMORY_API_CACHE_TTL_MS = Math.max(5000, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_CACHE_TTL_MS || '20000', 10) || 20000);
+const memoryApiCache = new Map(); // scope -> { entries: [], ts }
 const MEMORY_JSON_MAX_LENGTH = 1024 * 1024; // 1MB，与 exec maxBuffer 配合，防止过大 JSON 解析
 const MEMORY_JSON_MAX_DEPTH = 100; // 最大嵌套深度，防止恶意深层 JSON 导致堆栈溢出
 
@@ -886,26 +1082,77 @@ function parseMemoryListOutput(raw, scopeForLog) {
   }
 }
 
-/** 异步拉取某 scope 的记忆（不阻塞主轮询） */
+/**
+ * 异步拉取某 scope 的记忆。使用 spawn + 读完后 kill，避免 exec 产生大量常驻子进程导致进程爆炸。
+ * scope 仅允许 safe 格式（由调用方校验），不通过 shell 拼接，防止注入。
+ */
 function getMemoryForScopeAsync(scope) {
   return new Promise((resolve) => {
-    exec(
-      `openclaw memory-pro list --scope "${scope}" --json --limit ${MEMORY_LIMIT} 2>/dev/null`,
-      { encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024, timeout: COMMAND_TIMEOUT_MS, env: process.env },
-      (err, stdout) => {
-        if (err) {
-          console.warn('[writer] memory', scope, 'exec err', err.message || err);
-          resolve([]);
-          return;
-        }
-        const raw = stdout || '';
-        if (MEMORY_DEBUG || raw.length < 10) console.log('[writer] memory', scope, 'stdoutLen=', raw.length, 'head=', raw.slice(0, 100));
-        const entries = parseMemoryListOutput(raw, scope);
-        console.log('[writer] memory', scope, '->', entries.length, '条');
-        resolve(entries);
+    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 10000);
+    let raw = '';
+    let resolved = false;
+    const child = spawn('openclaw', ['memory-pro', 'list', '--scope', scope, '--json', '--limit', String(MEMORY_LIMIT)], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+      console.warn('[writer] memory', scope, 'timeout', timeoutMs, 'ms');
+      resolve([]);
+    }, timeoutMs);
+    function tryResolve() {
+      const entries = parseMemoryListOutput(raw, scope);
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      if (MEMORY_DEBUG || raw.length < 10) console.log('[writer] memory', scope, 'stdoutLen=', raw.length);
+      console.log('[writer] memory', scope, '->', entries.length, '条');
+      resolve(entries);
+    }
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > MEMORY_JSON_MAX_LENGTH) raw = raw.slice(-(MEMORY_JSON_MAX_LENGTH / 2));
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', (err) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        console.warn('[writer] memory', scope, 'spawn err', err.message || err);
+        resolve([]);
       }
-    );
+    });
+    child.on('close', (code) => {
+      if (resolved) return;
+      tryResolve();
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        resolve([]);
+      }
+    });
   });
+}
+
+/** 按并发上限依次执行 Promise，返回结果数组（与 inputs 顺序一致）；单次失败填默认值不中断整批 */
+function runBatched(inputs, concurrency, fn) {
+  const results = new Array(inputs.length);
+  let index = 0;
+  function next() {
+    if (index >= inputs.length) return Promise.resolve();
+    const i = index++;
+    const item = inputs[i];
+    return Promise.resolve(fn(item, i))
+      .then((v) => { results[i] = v; })
+      .catch((e) => { results[i] = []; console.warn('[writer] runBatched', item, (e && e.message) || e); })
+      .then(next);
+  }
+  const workers = Math.min(concurrency, inputs.length);
+  return Promise.all(Array.from({ length: workers }, () => next())).then(() => results);
 }
 
 async function updateStatus() {
@@ -936,6 +1183,7 @@ async function updateStatus() {
   const heartbeatAgents = (status.heartbeat && status.heartbeat.agents) ? status.heartbeat.agents : [];
   const agentModelFromConfig = getAgentModelFromOpenClawConfig();
   const agentChannelsFromConfig = getAgentChannelsFromConfig();
+  const agentGroupFromConfig = getAgentGroupFromOpenClawConfig();
 
   const agents = agentsList.map((a, index) => {
     const lastActiveAgeMs = a.lastActiveAgeMs != null ? a.lastActiveAgeMs : null;
@@ -955,6 +1203,7 @@ async function updateStatus() {
     return {
       id: a.id,
       name: a.name || a.id,
+      group: agentGroupFromConfig[a.id] != null ? agentGroupFromConfig[a.id] : null,
       color: getColorForIndex(index),
       status: statusStr,
       message,
@@ -1046,42 +1295,106 @@ async function updateStatus() {
   });
   const tokenByModel = Object.values(tokenByModelMap).sort((a, b) => (b.cumulative || 0) - (a.cumulative || 0));
 
-  let gateway = status.gateway
-    ? {
-        reachable: !!status.gateway.reachable,
-        url: REDACT_PATHS ? null : (status.gateway.url || null),
-        latencyMs: status.gateway.connectLatencyMs ?? null,
-        version: status.gateway.self && status.gateway.self.version ? status.gateway.self.version : null,
-        host: REDACT_PATHS ? null : (status.gateway.self && status.gateway.self.host ? status.gateway.self.host : null),
-        ip: REDACT_PATHS ? null : (status.gateway.self && status.gateway.self.ip ? status.gateway.self.ip : null),
-        error: status.gateway.error || null,
+  const costConfig = readCostConfig();
+  const costModels = costConfig.models || {};
+  const costByModel = [];
+  let totalEstimatedCost = 0;
+  for (const row of tokenByModel) {
+    const cumulative = row.cumulative || 0;
+    const m = costModels[row.modelId];
+    let estimatedCost = null;
+    if (m && cumulative > 0) {
+      const inp = Number(m.inputPerM);
+      const out = Number(m.outputPerM);
+      const avgPerM = ((isNaN(inp) ? 0 : inp) + (isNaN(out) ? 0 : out)) / 2;
+      if (avgPerM > 0) {
+        estimatedCost = (cumulative / 1e6) * avgPerM;
+        totalEstimatedCost += estimatedCost;
       }
-    : { reachable: false, error: '无 gateway 数据' };
+    }
+    costByModel.push({ modelId: row.modelId, cumulative, estimatedCost });
+  }
+  const costSummary = { byModel: costByModel, totalEstimatedCost };
 
-  // 当 status 报离线时，用直连 URL 探测和 openclaw health --json 做备用判定
+  // 兼容多种 CLI 字段：reachable / connected / ok 任一为 true 即视为在线
+  const gwFromStatus = status.gateway;
+  const statusSaysReachable = !!(gwFromStatus && (
+    gwFromStatus.reachable === true ||
+    gwFromStatus.connected === true ||
+    gwFromStatus.ok === true
+  ));
+  let gateway = gwFromStatus
+    ? {
+        reachable: statusSaysReachable,
+        url: REDACT_PATHS ? null : (gwFromStatus.url || null),
+        latencyMs: gwFromStatus.connectLatencyMs ?? null,
+        version: gwFromStatus.self && gwFromStatus.self.version ? gwFromStatus.self.version : null,
+        host: REDACT_PATHS ? null : (gwFromStatus.self && gwFromStatus.self.host ? gwFromStatus.self.host : null),
+        ip: REDACT_PATHS ? null : (gwFromStatus.self && gwFromStatus.self.ip ? gwFromStatus.self.ip : null),
+        error: gwFromStatus.error || null,
+      }
+    : { reachable: false, url: null, error: '无 gateway 数据' };
+
+  // status 报在线时刷新缓存，便于后续周期若误报离线则直接复用
+  if (gateway.reachable) {
+    gatewayProbeCache = { reachable: true, displayUrl: gateway.url || GATEWAY_FALLBACK_URL, at: Date.now() };
+  }
+
+  // 当 status 报离线时，先看缓存：缓存有效则不再探测，避免一会在线一会离线
+  let correctedHealthJson = null;
   if (!gateway.reachable) {
-    const urlToProbe = gateway.url || GATEWAY_FALLBACK_URL;
-    let probeOk = await probeGatewayUrl(urlToProbe);
-    if (!probeOk) {
-      try {
-        const parsed = url.parse(urlToProbe);
-        const base = (parsed.protocol || 'http:') + '//' + (parsed.hostname || '127.0.0.1') + ':' + (parsed.port || (parsed.protocol === 'https:' ? 443 : 18789));
-        probeOk = await probeGatewayUrl(base + '/health');
-      } catch (_) {}
-    }
-    if (!probeOk) {
-      probeOk = await getGatewayReachableViaHealth();
-    }
-    if (probeOk) {
-      gateway = { ...gateway, reachable: true, error: null };
-      console.log('[writer] gateway 状态已由直连/health 探测修正为在线');
+    const now = Date.now();
+    const cacheValid = (now - gatewayProbeCache.at) < GATEWAY_PROBE_CACHE_MS && gatewayProbeCache.reachable !== null;
+    if (cacheValid) {
+      gateway.reachable = gatewayProbeCache.reachable;
+      if (gatewayProbeCache.reachable) {
+        gateway.error = null;
+        if (gatewayProbeCache.displayUrl && !REDACT_PATHS) gateway.url = gatewayProbeCache.displayUrl;
+      }
+    } else {
+      // 缓存过期或无效，本周期只探测一次
+      const preferFallback = process.env.OPENCLAW_MONITOR_GATEWAY_URL && process.env.OPENCLAW_MONITOR_GATEWAY_URL.trim() !== '';
+      const urlToProbe = preferFallback ? GATEWAY_FALLBACK_URL : (gateway.url || GATEWAY_FALLBACK_URL);
+      let probeOk = await probeGatewayUrl(urlToProbe);
+      let usedUrl = urlToProbe;
+      if (!probeOk) {
+        try {
+          const parsed = url.parse(urlToProbe);
+          const port = parsed.port || (parsed.protocol === 'wss:' || parsed.protocol === 'https:' ? 443 : (parsed.protocol === 'ws:' ? 18789 : 80));
+          const base = (parsed.protocol === 'wss:' || parsed.protocol === 'https:' ? 'https:' : 'http:') + '//' + (parsed.hostname || '127.0.0.1') + ':' + port;
+          probeOk = await probeGatewayUrl(base + '/health');
+          if (probeOk) usedUrl = base + '/health';
+        } catch (_) {}
+      }
+      if (!probeOk && urlToProbe !== GATEWAY_FALLBACK_URL) {
+        probeOk = await probeGatewayUrl(GATEWAY_FALLBACK_URL);
+        if (probeOk) usedUrl = GATEWAY_FALLBACK_URL;
+        if (!probeOk) {
+          probeOk = await probeGatewayUrl(GATEWAY_FALLBACK_URL.replace(/\/$/, '') + '/health');
+          if (probeOk) usedUrl = GATEWAY_FALLBACK_URL.replace(/\/$/, '') + '/health';
+        }
+      }
+      if (!probeOk) {
+        const healthResult = await getGatewayReachableViaHealth();
+        probeOk = healthResult.reachable;
+        if (healthResult.healthJson) correctedHealthJson = healthResult.healthJson;
+      }
+      const displayUrl = (usedUrl.endsWith('/health') ? usedUrl.replace(/\/health$/, '') : usedUrl);
+      gatewayProbeCache = { reachable: probeOk, displayUrl: probeOk ? displayUrl : null, at: Date.now() };
+      if (probeOk) {
+        gateway = { ...gateway, reachable: true, error: null, url: REDACT_PATHS ? null : displayUrl };
+        console.log('[writer] gateway 状态已由直连/health 探测修正为在线');
+      }
     }
   }
+
+  const pluginsPromise = getPluginsSummaryFromCli();
 
   let channelHealth = [];
   let modelHealth = [];
   if (gateway.reachable) {
-    const [healthJson, modelsJson] = await Promise.all([getHealthJson(), getModelsStatusJson()]);
+    const healthJson = correctedHealthJson != null ? correctedHealthJson : await getHealthJson();
+    const modelsJson = await getModelsStatusJson();
     channelHealth = normalizeChannelHealthFromHealth(healthJson);
     if (channelHealth.length === 0 && Array.isArray(status.channelSummary) && status.channelSummary.length > 0) {
       channelHealth = status.channelSummary.map((ch) => {
@@ -1136,6 +1449,9 @@ async function updateStatus() {
   const rawControlUrl = gateway.reachable ? (gateway.url || GATEWAY_FALLBACK_URL) : null;
   const controlUiUrl = rawControlUrl ? toHttpUrl(rawControlUrl) : null;
 
+  let pluginsSummaryFromCli = null;
+  try { pluginsSummaryFromCli = await pluginsPromise; } catch (_) {}
+
   const out = {
     lastUpdated: new Date().toISOString(),
     defaultAgentId: (status.agents && status.agents.defaultId) || null,
@@ -1152,8 +1468,9 @@ async function updateStatus() {
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
     tokenCumulative: { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal },
     tokenByModel,
+    costSummary,
     modelsSummary: getModelsSummaryFromConfig(),
-    pluginsSummary: getPluginsSummaryFromConfig(),
+    pluginsSummary: pluginsSummaryFromCli != null ? pluginsSummaryFromCli : getPluginsSummaryFromConfig(),
   };
 
   if (!safeWriteStatusFile(out)) {
@@ -1166,25 +1483,23 @@ async function updateStatus() {
   }
 }
 
+let updateMemoryRunning = false;
 /** 单独、低频、异步拉取角色记忆，不阻塞主轮询与页面 */
 function updateMemory() {
-  if (!MEMORY_ENABLED) return;
+  if (!MEMORY_ENABLED || updateMemoryRunning) return;
+  updateMemoryRunning = true;
   let data;
   try {
     data = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
   } catch (e) {
     console.warn('[writer] updateMemory read:', e.message || e);
+    updateMemoryRunning = false;
     return;
   }
   const agents = data.agents || [];
   const scopes = ['global'].concat(agents.map((a) => 'agent:' + a.id));
-  Promise.allSettled(scopes.map((scope) => getMemoryForScopeAsync(scope)))
-    .then((outcomes) => {
-      const results = outcomes.map((o, i) => {
-        if (o.status === 'fulfilled') return o.value;
-        console.warn('[writer] updateMemory scope 失败:', scopes[i], (o.reason && (o.reason.message || o.reason)) || o.reason);
-        return [];
-      });
+  runBatched(scopes, MEMORY_CONCURRENCY, (scope) => getMemoryForScopeAsync(scope))
+    .then((results) => {
       let latest;
       try {
         latest = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
@@ -1207,7 +1522,8 @@ function updateMemory() {
       };
       tryWrite();
     })
-    .catch((e) => console.warn('[writer] updateMemory:', e.message || e));
+    .catch((e) => console.warn('[writer] updateMemory:', e.message || e))
+    .finally(() => { updateMemoryRunning = false; });
 }
 
 const initial = {
@@ -1220,6 +1536,7 @@ const initial = {
   channelHealth: [],
   modelHealth: [],
   tokenByModel: [],
+  costSummary: { byModel: [], totalEstimatedCost: 0 },
   sessionsTotal: null,
   recentSessions: [],
   system: null,
@@ -1235,7 +1552,7 @@ console.log('输出:', OUTPUT_FILE);
 console.log('间隔:', CHECK_INTERVAL_MS, 'ms');
 if (REDACT_PATHS) console.log('路径脱敏: 已开启');
 if (SESSION_CONTENT_PREVIEW_MAX === 0) console.log('会话内容预览: 已关闭');
-if (MEMORY_ENABLED) console.log('角色记忆: 已开启 (异步, 间隔', MEMORY_INTERVAL_MS, 'ms, 每 scope 最多', MEMORY_LIMIT, '条)');
+if (MEMORY_ENABLED) console.log('角色记忆: 已开启 (异步, 间隔', MEMORY_INTERVAL_MS, 'ms, 每 scope 最多', MEMORY_LIMIT, '条, 并发', MEMORY_CONCURRENCY, ')');
 else console.log('角色记忆: 已关闭');
 
 const SERVER_PORT = parseInt(process.env.OPENCLAW_MONITOR_PORT || '3880', 10) || 3880;
@@ -1264,11 +1581,19 @@ function serveMemoryApi(req, res) {
     res.end(JSON.stringify({ error: 'invalid scope' }));
     return true;
   }
+  const cached = memoryApiCache.get(safe);
+  if (cached && (Date.now() - cached.ts) < MEMORY_API_CACHE_TTL_MS) {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end(JSON.stringify(cached.entries));
+    return true;
+  }
   console.log('[writer] GET /memory?scope=' + safe);
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
   getMemoryForScopeAsync(safe)
     .then((entries) => {
+      memoryApiCache.set(safe, { entries, ts: Date.now() });
       console.log('[writer] GET /memory?scope=' + safe, '响应', entries.length, '条');
       res.end(JSON.stringify(entries));
     })

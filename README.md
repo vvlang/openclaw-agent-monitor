@@ -44,7 +44,7 @@
 ```
 
 - **数据与 API**：`agent-status.json` 由 writer 生成（不提交 Git）；成本配置存 `model-pricing.json`（可选）；Token 累计状态存 `token-cumulative-state.json`（不提交）。
-- **运行环境**：writer 需在已安装 OpenClaw 的机器上运行；`openclaw status --json` 使用 spawn + 流式读取，读到完整 JSON 后立即结束子进程，兼容安装插件（如 openclaw-self-healing）后 CLI 不退出的情况。仪表盘通过 writer 提供的 HTTP 同源访问。
+- **运行环境**：writer 需在已安装 OpenClaw 的机器上运行；`openclaw status --json` 使用 spawn + 流式读取，读到完整 JSON 后立即结束子进程，兼容安装插件（如 openclaw-self-healing）后 CLI 不退出的情况。status/health/models/plugins 等 CLI 调用经全局串行队列执行，同一时刻仅一个 openclaw 子进程，避免进程堆积。仪表盘通过 writer 提供的 HTTP 同源访问。
 
 ---
 
@@ -129,10 +129,19 @@ node agent-status-writer.js
 | `OPENCLAW_MONITOR_NO_MEMORY` | 未设置 | 设为 `1` 时不拉取角色记忆（`openclaw memory-pro list`），不写入 `memoryGlobal` 与 `agents[].memoryEntries`。 |
 | `OPENCLAW_MONITOR_MEMORY_LIMIT` | 30 | 每个 scope（global、agent:&lt;id&gt;）最多拉取的记忆条数（5–100）。 |
 | `OPENCLAW_MONITOR_MEMORY_INTERVAL_MS` | 30000 | 角色记忆**单独**轮询间隔（毫秒）。记忆使用异步拉取、不与 5s 状态轮询同频，避免 agent 运行时阻塞页面。 |
+| `OPENCLAW_MONITOR_MEMORY_CONCURRENCY` | 2 | 同时拉取记忆的 scope 数量上限（1–10）。Agent 多时若曾出现 openclaw 进程爆炸，可保持 2 或调小。 |
+| `OPENCLAW_MONITOR_MEMORY_CACHE_TTL_MS` | 20000 | 仪表盘 GET /memory 响应缓存时间（毫秒），重复点击「读取记忆」时命中缓存不重复起进程。 |
 | `OPENCLAW_MONITOR_MEMORY_DEBUG` | 未设置 | 设为 `1` 时在终端输出记忆解析调试日志。 |
 | `OPENCLAW_MONITOR_PORT` | 3880 | writer 内置 HTTP 服务端口。 |
 | `OPENCLAW_DIR` | `~/.openclaw` | OpenClaw 配置目录，用于读取 `openclaw.json`（成本设置模型 ID、可选）。 |
-| `OPENCLAW_MONITOR_GATEWAY_URL` | `http://127.0.0.1:18789` | 当 `openclaw status` 未提供 gateway URL 或报离线时，writer 直连探测用的备用网关地址（需与 OpenClaw 实际端口一致）。 |
+| `OPENCLAW_MONITOR_GATEWAY_URL` | `http://127.0.0.1:18789` | 当 `openclaw status` 未提供 gateway URL 或报离线时，writer 直连探测用的备用网关地址（需与 OpenClaw 实际端口一致）。若 status 提供的 URL 探测失败，writer 会再尝试此 fallback。 |
+| `OPENCLAW_MONITOR_GATEWAY_CACHE_MS` | 60000 | 探测结果缓存时间（毫秒）。此时间内 status 再报离线时直接复用上次结果，不重复探测，避免「一会在线一会离线」闪烁。 |
+| `OPENCLAW_MONITOR_GATEWAY_DEBUG` | 未设置 | 设为 `1` 时输出直连探测的失败原因（status、error、timeout），便于排查「Gateway 实际在线但页面显示离线」。 |
+
+**示例（Gateway 在远程/Tailscale 机器）**：若 Gateway 跑在 Tailscale 对端，可设置  
+`OPENCLAW_MONITOR_GATEWAY_URL=https://mac-mini.tail365b.ts.net`（HTTPS 默认 443 端口；若 Gateway 监听其他端口则加 `:端口`）。  
+直连探测通过 **curl** 执行：未设置时等价于 `curl http://127.0.0.1:18789`；设置后等价于 `curl -s -k <OPENCLAW_MONITOR_GATEWAY_URL>`（`-k` 与 Tailscale/自签名兼容）。  
+启动示例：`OPENCLAW_MONITOR_GATEWAY_URL=https://mac-mini.tail365b.ts.net ./start.sh`
 
 ### writer 常量（agent-status-writer.js 顶部，无环境变量时生效）
 
