@@ -764,7 +764,7 @@
                 modelHealthList.forEach(function (x) { modelAvailable[x.modelId] = x.available; });
                 groupNames.forEach(function (groupKey) {
                     var groupAgents = byGroup[groupKey] || [];
-                    var groupTitle = groupKey === '' ? '未分组' : groupKey;
+                    var groupTitle = groupKey === '' ? '未分组' : ('协作圈：' + groupKey);
                     var groupDiv = document.createElement('div');
                     groupDiv.className = 'agent-group';
                     groupDiv.innerHTML = '<h3 class="agent-group-title">' + escapeHtml(groupTitle) + '</h3><div class="agent-group-cards"></div>';

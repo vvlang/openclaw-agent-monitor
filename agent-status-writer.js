@@ -1215,6 +1215,7 @@ async function updateStatus() {
   const heartbeatAgents = (status.heartbeat && status.heartbeat.agents) ? status.heartbeat.agents : [];
   const agentModelFromConfig = getAgentModelFromOpenClawConfig();
   const agentChannelsFromConfig = getAgentChannelsFromConfig();
+  const agentGroupFromConfig = getAgentGroupFromOpenClawConfig();
 
   const agents = agentsList.map((a, index) => {
     const lastActiveAgeMs = a.lastActiveAgeMs != null ? a.lastActiveAgeMs : null;
@@ -1231,9 +1232,11 @@ async function updateStatus() {
     }
     const modelId = agentModelFromConfig[a.id] != null ? agentModelFromConfig[a.id] : (a.model || null);
     const boundChannels = Array.isArray(agentChannelsFromConfig[a.id]) ? agentChannelsFromConfig[a.id] : [];
+    const group = agentGroupFromConfig[a.id] != null ? agentGroupFromConfig[a.id] : null;
     return {
       id: a.id,
       name: a.name || a.id,
+      group,
       color: getColorForIndex(index),
       status: statusStr,
       message,
