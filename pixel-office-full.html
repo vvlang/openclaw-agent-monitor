@@ -13,7 +13,13 @@
         .header a:hover { color: #e2e8f0; }
         #game-wrap { width: 100%; max-width: 100%; display: flex; justify-content: center; }
         #game { display: block; background: #d6d3d1; border: 2px solid #a8a29e; image-rendering: pixelated; image-rendering: crisp-edges; max-width: 100%; height: auto; }
-        #legend { padding: 0 0.25rem; }
+        #legend { padding: 0 0.25rem; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        /* OpenClaw-bot-review 同款 Agent 图例 chip 样式 */
+        .pixel-agent-chip { opacity: 0.92; display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 4px; font-size: 10px; border: 1px solid; margin-right: 2px; }
+        .pixel-agent-chip-working { background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.35); color: #166534; }
+        .pixel-agent-chip-idle { background: rgba(250, 204, 21, 0.14); border-color: rgba(250, 204, 21, 0.35); color: #92400e; }
+        .pixel-agent-chip-neutral { background: rgba(100, 116, 139, 0.22); border-color: rgba(148, 163, 184, 0.42); color: #475569; }
+        .pixel-agent-chip-error { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.35); color: #b91c1c; }
         .footer { margin-top: 0.25rem; font-size: 10px; color: #64748b; padding: 0 0.25rem; }
         @media (max-width: 520px) {
             body { padding: 0.5rem; padding-left: env(safe-area-inset-left, 0.5rem); padding-right: env(safe-area-inset-right, 0.5rem); }
@@ -29,7 +35,7 @@
         <h1>🏫 三年二班</h1>
         <a href="agent-dashboard.html">← 返回监控</a>
     </div>
-    <div id="legend" style="width:100%;max-width:100%;margin-bottom:4px;font-size:10px;color:#94a3b8;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
+    <div id="legend"></div>
     <div id="game-wrap"><canvas id="game"></canvas></div>
     <div id="footer" class="footer">加载中…</div>
 
@@ -760,18 +766,25 @@
             var map = { checking: '初始化', idle: '空闲', thinking: '工作中', error: '异常' };
             return map[s] || (s || '');
         }
+        function chipClass(status) {
+            if (status === 'thinking') return 'pixel-agent-chip pixel-agent-chip-working';
+            if (status === 'idle') return 'pixel-agent-chip pixel-agent-chip-idle';
+            if (status === 'error') return 'pixel-agent-chip pixel-agent-chip-error';
+            return 'pixel-agent-chip pixel-agent-chip-neutral';
+        }
         if (legendEl) {
             if (agents.length === 0) {
                 legendEl.textContent = '无 Agent';
             } else {
-                var legendHtml = '图例：';
+                var legendHtml = '<span style="color:#64748b;margin-right:6px;">图例：</span>';
                 agents.forEach(function(a, idx) {
                     var ch = agentIdToChar[a.id];
                     var color = ch ? ch.color : colorFromAgent(a, idx);
                     var label = (a.name || a.id || '').trim() || a.id;
                     var state = statusLabel(a.status);
-                    legendHtml += '<span style="display:inline-flex;align-items:center;margin-right:8px;">' +
-                        '<span style="width:10px;height:10px;border-radius:2px;background:' + color + ';margin-right:3px;"></span>' +
+                    var chip = chipClass(a.status);
+                    legendHtml += '<span class="' + chip + '">' +
+                        '<span style="width:8px;height:8px;border-radius:2px;background:' + color + ';margin-right:4px;flex-shrink:0;"></span>' +
                         '<span>' + label + (state ? '（' + state + '）' : '') + '</span>' +
                         '</span>';
                 });

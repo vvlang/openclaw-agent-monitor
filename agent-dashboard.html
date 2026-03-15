@@ -29,13 +29,11 @@
         .sys-high { color: #ef4444; }
         .sys-online { color: #22c55e; }
         .sys-offline { color: #64748b; }
-        #agents-container { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); max-height: 280px; overflow-y: auto; overflow-x: hidden; }
-        .agent-card { max-height: 280px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
-        @media (min-width: 768px) {
-            .agent-cards-section { overflow: visible; }
-            #agents-container { max-height: none; overflow-y: visible; }
-            .agent-card { max-height: none; overflow: visible; }
-        }
+        #agents-container { display: flex; flex-direction: column; gap: 1rem; overflow-x: hidden; }
+        .agent-group { display: flex; flex-direction: column; gap: 0.5rem; }
+        .agent-group-title { font-size: 11px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin: 0; padding: 0.25rem 0; border-bottom: 1px solid rgba(51, 65, 85, 0.6); }
+        .agent-group-cards { display: grid; gap: 0.6rem; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+        .agent-card { -webkit-overflow-scrolling: touch; }
         .agent-card-content { display: flex; flex-direction: column; gap: 0.35rem; align-items: center; min-width: 0; }
         .agent-token-bar { height: 4px; border-radius: 2px; background: #334155; overflow: hidden; width: 100%; max-width: 120px; }
         .agent-token-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease, background-color 0.2s; }
@@ -76,7 +74,8 @@
             body { min-height: 100vh; min-height: 100dvh; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; }
             .safe-area-padding { padding-left: env(safe-area-inset-left, 0); padding-right: env(safe-area-inset-right, 0); padding-top: env(safe-area-inset-top, 0); }
             .agent-cards-section { overflow: visible; min-height: 0; }
-            #agents-container { grid-template-columns: 1fr; gap: 0.75rem; max-height: none; overflow-x: hidden; overflow-y: visible; padding-bottom: 0.5rem; }
+            .agent-group-cards { grid-template-columns: 1fr; }
+            #agents-container { max-height: none; overflow-x: hidden; overflow-y: visible; padding-bottom: 0.5rem; }
             .agent-card { min-width: 0; width: 100%; padding: 0.75rem; max-height: none; overflow: visible; }
         }
         /* CDN 不可用时的备用布局，避免页面完全错乱 */
@@ -101,7 +100,7 @@
         .gap-3 { gap: 0.75rem; }
     </style>
 </head>
-<body class="min-h-screen overflow-y-auto md:h-screen md:overflow-hidden flex flex-col">
+<body class="min-h-screen overflow-y-auto overflow-x-hidden flex flex-col scroll-touch">
 
     <header class="bg-slate-800 border-b border-slate-700 px-3 py-2 md:px-6 md:py-3 shadow-lg z-10 shrink-0 safe-area-padding">
         <div class="header-first-row flex flex-col gap-2 md:flex-row md:justify-between md:items-center md:mb-2">
@@ -111,6 +110,8 @@
             <p class="text-[11px] md:text-xs text-slate-400 mt-0.5 hidden sm:block md:hidden">监控当前配置中的全部 Agent · Gateway · 通道 · 会话</p>
             <div class="header-toolbar flex items-center gap-2 md:gap-4 flex-wrap min-h-[24px] md:min-h-[26px]">
                 <a href="pixel-office-full.html" class="text-amber-400 hover:text-amber-300 underline shrink-0"><span class="header-toolbar-item-inner">🏫 三年二班</span></a>
+                <span class="text-slate-600 shrink-0" aria-hidden="true">|</span>
+                <a href="models.html" class="text-sky-400 hover:text-sky-300 underline shrink-0"><span class="header-toolbar-item-inner">模型列表</span></a>
                 <span class="text-slate-600 shrink-0" aria-hidden="true">|</span>
                 <div id="system-info" class="font-mono text-slate-400 gap-2 md:gap-3 flex flex-wrap shrink-0">
                     <span id="sys-cpu" title="CPU 使用率">--</span>
@@ -146,8 +147,8 @@
         </div>
     </header>
 
-    <section class="agent-cards-section bg-slate-800/80 border-b border-slate-700 px-3 md:px-6 py-2 shrink-0 overflow-hidden flex flex-col min-h-0" aria-label="Agent 卡片">
-        <div id="agents-container" class="gap-3 max-h-[280px] overflow-y-auto overflow-x-hidden scroll-touch">
+    <section class="agent-cards-section bg-slate-800/80 border-b border-slate-700 px-3 md:px-6 py-2 shrink-0 flex flex-col" aria-label="Agent 卡片">
+        <div id="agents-container" class="gap-3 overflow-x-hidden">
             <div class="col-span-full text-center py-6 text-slate-500">
                 <div class="inline-block animate-spin mr-2">⟳</div>
                 正在连接监控服务...
@@ -155,8 +156,8 @@
         </div>
     </section>
 
-    <main class="flex-1 min-h-0 flex flex-col md:flex-row md:overflow-hidden overflow-y-auto overflow-x-hidden scroll-touch">
-        <div class="flex-1 min-w-0 p-3 md:p-4 bg-slate-900/50 flex flex-col md:min-h-0 md:overflow-y-auto md:overflow-x-hidden">
+    <main class="flex flex-col md:flex-row overflow-x-hidden">
+        <div class="flex-1 min-w-0 p-3 md:p-4 bg-slate-900/50 flex flex-col">
             <div class="flex justify-between items-center mb-2 md:mb-3 shrink-0">
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider">状态变化日志</h2>
                 <button type="button" onclick="clearLogs()" class="tap-target text-xs text-slate-500 hover:text-white active:bg-slate-700/50 rounded px-2">清空</button>
@@ -174,6 +175,7 @@
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按模型）</h2>
+                <p class="text-[10px] text-slate-500 mb-2">累计按会话归属到当时使用的模型；预估成本按「成本设置」单价（输入/输出未区分，均价估算）。</p>
                 <div id="token-by-model" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
                     <div class="text-slate-600 italic">等待数据...</div>
                 </div>
@@ -207,9 +209,10 @@
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">模型列表</h2>
-                <div id="models-summary" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 max-h-32 overflow-y-auto">
+                <div id="models-summary" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
                     <div class="text-slate-600 italic">等待数据...</div>
                 </div>
+                <a href="models.html" class="inline-block mt-1.5 text-xs text-amber-400 hover:text-amber-300 underline">查看全部模型 →</a>
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
@@ -236,13 +239,13 @@
             </div>
         </div>
 
-        <div id="raw-json-panel" class="w-full md:w-72 bg-slate-950 border-t md:border-t-0 md:border-l border-slate-800 shrink-0 flex flex-col min-h-0">
+        <div id="raw-json-panel" class="w-full md:w-72 bg-slate-950 border-t md:border-t-0 md:border-l border-slate-800 shrink-0 flex flex-col">
             <button type="button" id="raw-json-toggle" class="relative sticky top-0 z-10 flex items-center justify-between w-full gap-2 py-2 px-3 bg-slate-950 border-b border-slate-800 text-left tap-target hover:bg-slate-900 active:bg-slate-800 md:min-w-0">
                 <span class="raw-json-text text-slate-500 font-bold text-[10px] md:text-xs truncate">原始 JSON</span>
                 <span id="raw-json-toggle-label" class="raw-json-text text-slate-500 text-[10px] shrink-0">折叠</span>
                 <span id="raw-json-collapsed-icon" class="hidden text-slate-500 text-sm absolute inset-0 flex items-center justify-center pointer-events-none">»</span>
             </button>
-            <div id="raw-json-body" class="flex-1 min-h-0 p-3 overflow-x-auto overflow-y-auto text-[10px] text-slate-400 font-mono scroll-touch">
+            <div id="raw-json-body" class="p-3 overflow-x-auto text-[10px] text-slate-400 font-mono">
                 <pre id="raw-json" class="whitespace-pre-wrap break-all opacity-80 min-w-0">等待数据...</pre>
             </div>
         </div>
@@ -423,6 +426,11 @@
             var label = providerLabels[provider] || (provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : '');
             return label ? label + ' · ' + short : short;
         }
+        function formatCost(usd) {
+            if (usd == null || isNaN(usd)) return '—';
+            if (usd < 0.01 && usd > 0) return '$0.00';
+            return '$' + usd.toFixed(2);
+        }
         function renderTokenByModel(data) {
             var el = document.getElementById('token-by-model');
             if (!el) return;
@@ -431,17 +439,30 @@
                 el.innerHTML = '<div class="text-slate-600 italic">暂无按模型汇总数据</div>';
                 return;
             }
+            var costByModelId = {};
+            var cs = data.costSummary;
+            if (cs && Array.isArray(cs.byModel)) {
+                cs.byModel.forEach(function (r) { costByModelId[r.modelId] = r.estimatedCost; });
+            }
             var rows = list.map(function (m) {
                 var label = modelDisplayName(m.modelId);
                 var cur = formatTokenNum(m.current);
                 var cum = formatTokenNum(m.cumulative);
+                var cost = formatCost(costByModelId[m.modelId]);
                 return '<tr class="border-b border-slate-700/50">' +
                     '<td class="py-0.5 pr-2" title="' + escapeHtml(m.modelId) + '">' + escapeHtml(label) + '</td>' +
                     '<td class="py-0.5 pr-2 text-right" title="当前会话合计">' + cur + '</td>' +
-                    '<td class="py-0.5 text-right text-amber-400/90" title="累计（按会话归属到当时使用的模型）">' + cum + '</td>' +
+                    '<td class="py-0.5 pr-2 text-right text-amber-400/90" title="累计（按会话归属到当时使用的模型）">' + cum + '</td>' +
+                    '<td class="py-0.5 text-right text-emerald-400/90" title="按成本设置均价估算">' + cost + '</td>' +
                     '</tr>';
             }).join('');
-            el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 text-right">累计</th></tr></thead><tbody>' + rows + '</tbody></table>';
+            var totalLine = '';
+            if (cs && cs.totalEstimatedCost != null && cs.totalEstimatedCost > 0) {
+                totalLine = '<tr class="border-t border-slate-600 font-semibold text-slate-300">' +
+                    '<td class="py-1 pr-2">合计</td><td class="py-1 pr-2 text-right">—</td><td class="py-1 pr-2 text-right">—</td>' +
+                    '<td class="py-1 text-right text-emerald-400">' + formatCost(cs.totalEstimatedCost) + '</td></tr>';
+            }
+            el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 pr-2 text-right">累计</th><th class="py-0.5 text-right">预估成本</th></tr></thead><tbody>' + rows + totalLine + '</tbody></table>';
         }
 
         function renderModelsSummary(data) {
@@ -452,19 +473,14 @@
                 el.innerHTML = '<div class="text-slate-600 italic">暂无模型配置</div>';
                 return;
             }
-            var rows = list.map(function (m) {
-                var name = (m.id && m.id.indexOf('/') >= 0) ? m.id.split('/').pop() : (m.id || m.name || '');
-                var ctx = m.contextWindow != null ? (m.contextWindow >= 1000 ? (m.contextWindow / 1000) + 'K' : m.contextWindow) : '--';
-                var maxT = m.maxTokens != null ? m.maxTokens : '--';
-                var reason = m.reasoning ? '是' : '—';
-                return '<tr class="border-b border-slate-700/50">' +
-                    '<td class="py-0.5 pr-2 truncate max-w-[100px]" title="' + escapeHtml(m.id || '') + '">' + escapeHtml(name) + '</td>' +
-                    '<td class="py-0.5 pr-2 text-right">' + ctx + '</td>' +
-                    '<td class="py-0.5 pr-2 text-right">' + maxT + '</td>' +
-                    '<td class="py-0.5 text-slate-500">' + reason + '</td>' +
-                    '</tr>';
-            }).join('');
-            el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">上下文</th><th class="py-0.5 pr-2 text-right">maxOut</th><th class="py-0.5">推理</th></tr></thead><tbody>' + rows + '</tbody></table>';
+            var byProvider = {};
+            list.forEach(function (m) {
+                var p = m.provider || 'default';
+                if (!byProvider[p]) byProvider[p] = [];
+                byProvider[p].push(m);
+            });
+            var nProviders = Object.keys(byProvider).length;
+            el.innerHTML = '<div class="text-slate-400">共 <span class="text-slate-200">' + list.length + '</span> 个模型，来自 <span class="text-slate-200">' + nProviders + '</span> 个 Provider</div>';
         }
 
         function renderPluginsSummary(data) {
@@ -720,6 +736,15 @@
             if (agents.length === 0) {
                 agentsContainer.innerHTML = '<div class="col-span-full text-center py-6 text-slate-500">暂无 Agent（请运行 agent-status-writer.js 并确保 OpenClaw 已配置 Agent）</div>';
             } else {
+                var groupNames = [];
+                var byGroup = {};
+                agents.forEach(function (agent) {
+                    var g = (agent.group != null && String(agent.group).trim()) ? String(agent.group).trim() : '';
+                    if (!byGroup[g]) byGroup[g] = [];
+                    byGroup[g].push(agent);
+                });
+                groupNames = Object.keys(byGroup).filter(function (k) { return k !== ''; }).sort();
+                if (byGroup['']) groupNames.push('');
                 agentsContainer.innerHTML = '';
                 var channelLabels = { telegram: 'TG', imessage: 'iMsg', dingtalk: '钉钉', discord: 'DC', feishu: '飞书', slack: 'Slack', webchat: 'Web' };
                 function formatTokenNumShort(n) {
@@ -737,7 +762,14 @@
                 });
                 var modelAvailable = {};
                 modelHealthList.forEach(function (x) { modelAvailable[x.modelId] = x.available; });
-                agents.forEach(function (agent) {
+                groupNames.forEach(function (groupKey) {
+                    var groupAgents = byGroup[groupKey] || [];
+                    var groupTitle = groupKey === '' ? '未分组' : groupKey;
+                    var groupDiv = document.createElement('div');
+                    groupDiv.className = 'agent-group';
+                    groupDiv.innerHTML = '<h3 class="agent-group-title">' + escapeHtml(groupTitle) + '</h3><div class="agent-group-cards"></div>';
+                    var cardsContainer = groupDiv.querySelector('.agent-group-cards');
+                    groupAgents.forEach(function (agent) {
                     var statusClass = getStatusClass(agent.status);
                     var isThinking = agent.status === 'thinking';
                     var card = document.createElement('div');
@@ -791,7 +823,9 @@
                         (agent.message ? '<div class="text-[9px] text-slate-500 truncate w-full text-center" title="' + escapeHtml(agent.message) + '">' + escapeHtml(agent.message) + '</div>' : '') +
                         '<button type="button" class="memory-btn tap-target text-[9px] px-1.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 mt-0.5" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">记忆</button>' +
                         '</div>';
-                    agentsContainer.appendChild(card);
+                    cardsContainer.appendChild(card);
+                    });
+                    agentsContainer.appendChild(groupDiv);
                 });
             }
 

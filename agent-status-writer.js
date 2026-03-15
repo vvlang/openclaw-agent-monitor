@@ -1,9 +1,12 @@
 /**
  * OpenClaw 全量 Agent 状态写入器
  * 数据源：openclaw status --json，自动发现并监控配置中的全部 Agent。
+ *
+ * 重要：本程序仅读取 OpenClaw 配置（如 ~/.openclaw/openclaw.json、clawdbot.json），
+ * 绝不修改或写入 ~/.openclaw 下任何文件（含 alerts.json）。所有写入仅限项目目录（__dirname）下。
  */
 
-const { execSync, exec, spawn } = require('child_process');
+const { execSync, spawn, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -13,9 +16,34 @@ const url = require('url');
 
 /** Gateway 直连探测超时（毫秒），当 status 报离线时用此探测修正 */
 const GATEWAY_PROBE_TIMEOUT_MS = 3000;
-/** 当 status 未提供 gateway.url 时使用的备用 URL（OpenClaw 默认端口 18789） */
+/** Gateway 探测结果缓存时间（毫秒），此时间内不重复探测，避免在线/离线来回跳 */
+const GATEWAY_PROBE_CACHE_MS = Math.max(10000, parseInt(process.env.OPENCLAW_MONITOR_GATEWAY_CACHE_MS || '60000', 10) || 60000);
+/** 当 status 未提供 gateway.url 或探测失败时使用的 URL；未设置环境变量时等价于 curl http://127.0.0.1:18789 */
 const GATEWAY_FALLBACK_URL = process.env.OPENCLAW_MONITOR_GATEWAY_URL || 'http://127.0.0.1:18789';
 const OUTPUT_FILE = path.join(__dirname, 'agent-status.json');
+
+/** OpenClaw 配置目录：本程序仅读取（openclaw.json/clawdbot.json），绝不写入 */
+const OPENCLAW_CONFIG_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
+
+/** 写入前必须调用：若 filePath 在 ~/.openclaw 下则抛错，保证配置目录只读 */
+function ensureNotOpenClawConfigPath(filePath) {
+  const abs = path.resolve(filePath);
+  const dirAbs = path.resolve(OPENCLAW_CONFIG_DIR);
+  if (abs === dirAbs || abs.startsWith(dirAbs + path.sep)) {
+    throw new Error('[writer] 禁止写入 ~/.openclaw，仅允许读取: ' + filePath);
+  }
+}
+
+/** 最近一次 Gateway 探测结果：缓存期内直接复用，避免每次刷新都探测导致状态来回跳 */
+let gatewayProbeCache = { reachable: null, displayUrl: null, at: 0 };
+
+/** 全局串行队列：同一时刻只运行一个 openclaw 子进程（status/health/models/plugins），避免进程爆炸 */
+let openclawQueue = Promise.resolve();
+function withOpenClawQueue(fn) {
+  const next = openclawQueue.then(() => fn()).catch((e) => { throw e; });
+  openclawQueue = next.catch(() => {});
+  return next;
+}
 
 /** 将 ws/wss URL 转为 http/https，供 Control UI 链接使用（浏览器打开需 http） */
 function toHttpUrl(anyUrl) {
@@ -27,49 +55,144 @@ function toHttpUrl(anyUrl) {
 }
 const COST_CONFIG_FILE = path.join(__dirname, 'model-pricing.json');
 
+/** 从 OpenClaw 配置（内存缓存）读取 gateway.port、gateway.auth.token；仅读，用于 /api/health 鉴权 */
+function getGatewayPortAndTokenFromConfig() {
+  const config = getCachedOpenClawConfig();
+  const port = config.gateway && Number(config.gateway.port) > 0 ? Number(config.gateway.port) : 18789;
+  const token = (config.gateway && config.gateway.auth && typeof config.gateway.auth.token === 'string')
+    ? config.gateway.auth.token.trim()
+    : '';
+  return { port, token };
+}
+
 /**
- * 直连请求 gateway URL，用于在 status 报离线时做一次备用检测（避免插件/超时导致误报）
- * @param {string} gatewayUrl - 如 http://127.0.0.1:18789
- * @returns {Promise<boolean>}
+ * 参考 OpenClaw-bot-review：优先请求 Gateway /api/health（支持 Bearer token），与官方仪表盘检测方式一致
+ * @param {string} baseUrl - 如 http://127.0.0.1:18789 或 https://mac-mini.tail365b.ts.net
+ * @param {string} token - gateway.auth.token，空则不带 Authorization
+ * @returns {Promise<{ ok: boolean, responseMs?: number }>}
  */
-function probeGatewayUrl(gatewayUrl) {
-  if (!gatewayUrl || typeof gatewayUrl !== 'string') return Promise.resolve(false);
+function probeGatewayApiHealth(baseUrl, token) {
+  const base = (baseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return Promise.resolve({ ok: false });
+  const healthUrl = base + (base.endsWith('/api') ? '/health' : '/api/health');
   return new Promise((resolve) => {
     let parsed;
     try {
-      parsed = url.parse(gatewayUrl);
+      parsed = url.parse(healthUrl);
     } catch (_) {
-      resolve(false);
+      resolve({ ok: false });
       return;
     }
     const protocol = parsed.protocol === 'https:' ? https : http;
-    const pathToUse = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '/';
     const opts = {
       hostname: parsed.hostname,
       port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-      path: pathToUse,
+      path: parsed.path || '/api/health',
       method: 'GET',
       timeout: GATEWAY_PROBE_TIMEOUT_MS,
     };
+    if (parsed.protocol === 'https:') opts.rejectUnauthorized = false;
+    if (token) opts.headers = { Authorization: 'Bearer ' + token };
+    const start = Date.now();
     const req = protocol.get(opts, (res) => {
-      resolve(res.statusCode >= 200 && res.statusCode < 500);
+      const responseMs = Date.now() - start;
+      const ok = res.statusCode >= 200 && res.statusCode < 400;
+      resolve({ ok, responseMs });
       res.resume();
     });
-    req.on('error', () => resolve(false));
+    req.on('error', () => resolve({ ok: false }));
     req.on('timeout', () => {
       req.destroy();
-      resolve(false);
+      resolve({ ok: false });
     });
     req.setTimeout(GATEWAY_PROBE_TIMEOUT_MS);
   });
 }
 
 /**
- * 通过 openclaw health --json 判断 Gateway 是否可达（该命令向运行中的 Gateway 请求健康快照）
- * 使用 spawn + 读完整 JSON 后 kill，避免插件导致进程不退出。
+ * 将任意 gateway URL 规范为可用于 curl 的 http(s) 地址（ws/wss 转为 http/https，补默认端口）
+ */
+function normalizeProbeUrl(gatewayUrl) {
+  if (!gatewayUrl || typeof gatewayUrl !== 'string') return null;
+  let s = gatewayUrl.trim();
+  if (s.startsWith('ws://')) s = 'http://' + s.slice(5);
+  else if (s.startsWith('wss://')) s = 'https://' + s.slice(6);
+  let parsed;
+  try {
+    parsed = url.parse(s);
+  } catch (_) {
+    return null;
+  }
+  if (!parsed.hostname) return null;
+  let port = parsed.port;
+  if (!port && (parsed.protocol === 'https:' || s.startsWith('https://'))) port = 443;
+  if (!port && (parsed.protocol === 'http:' || s.startsWith('http://'))) port = 80;
+  if (!port) port = 18789;
+  const protocol = (parsed.protocol === 'https:' || s.startsWith('https://')) ? 'https:' : 'http:';
+  const path = (parsed.pathname && parsed.pathname !== '/') ? parsed.pathname : '';
+  const portPart = (port === 80 && protocol === 'http:') || (port === 443 && protocol === 'https:') ? '' : (':' + port);
+  return protocol + '//' + parsed.hostname + portPart + path;
+}
+
+/**
+ * 用 curl 直连请求 gateway URL 确认状态（等价于 curl -s -k <url>，默认即 curl http://127.0.0.1:18789）
+ * @param {string} gatewayUrl - 如 http://127.0.0.1:18789 或 https://mac-mini.tail365b.ts.net
  * @returns {Promise<boolean>}
  */
-function getGatewayReachableViaHealth() {
+function probeGatewayUrl(gatewayUrl) {
+  const urlToProbe = normalizeProbeUrl(gatewayUrl);
+  if (!urlToProbe) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timeoutSec = Math.max(1, Math.ceil(GATEWAY_PROBE_TIMEOUT_MS / 1000));
+    const args = [
+      '-s', '-k',
+      '-o', os.platform() === 'win32' ? 'NUL' : '/dev/null',
+      '-w', '%{http_code}',
+      '--connect-timeout', String(timeoutSec),
+      '--max-time', String(timeoutSec + 2),
+      urlToProbe,
+    ];
+    const child = spawn('curl', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
+    let out = '';
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (_) {}
+      if (process.env.OPENCLAW_MONITOR_GATEWAY_DEBUG === '1') {
+        console.warn('[writer] probeGatewayUrl curl timeout', urlToProbe);
+      }
+      resolve(false);
+    }, GATEWAY_PROBE_TIMEOUT_MS + 2000);
+    child.stdout.on('data', (chunk) => { out += chunk.toString('utf-8'); });
+    child.stderr.on('data', () => {});
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      if (process.env.OPENCLAW_MONITOR_GATEWAY_DEBUG === '1') {
+        console.warn('[writer] probeGatewayUrl curl error', urlToProbe, err.message || err);
+      }
+      resolve(false);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const codeStr = out.trim();
+      const num = parseInt(codeStr, 10);
+      const ok = !isNaN(num) && num >= 200 && num < 500;
+      if (!ok && process.env.OPENCLAW_MONITOR_GATEWAY_DEBUG === '1') {
+        console.warn('[writer] probeGatewayUrl curl', urlToProbe, 'code', code, 'http', codeStr);
+      }
+      resolve(ok);
+    });
+  });
+}
+
+/**
+ * 通过 openclaw health --json 判断 Gateway 是否可达，并返回健康 JSON 供复用（少一次 spawn）。
+ * 使用 spawn + 读完整 JSON 后 kill，避免插件导致进程不退出。
+ * @returns {Promise<{ reachable: boolean, healthJson: object|null }>}
+ */
+function getGatewayReachableViaHealthImpl() {
   return new Promise((resolve) => {
     const timeoutMs = Math.min(20000, Math.max(5000, GATEWAY_PROBE_TIMEOUT_MS * 2));
     let raw = '';
@@ -85,7 +208,7 @@ function getGatewayReachableViaHealth() {
       try {
         child.kill('SIGKILL');
       } catch (_) {}
-      resolve(false);
+      resolve({ reachable: false, healthJson: null });
     }, timeoutMs);
     function tryParse() {
       const start = raw.indexOf('{');
@@ -104,14 +227,14 @@ function getGatewayReachableViaHealth() {
       }
       if (end === -1) return;
       try {
-        JSON.parse(raw.slice(start, end + 1));
+        const healthJson = JSON.parse(raw.slice(start, end + 1));
         if (resolved) return;
         resolved = true;
         clearTimeout(timer);
         try {
           child.kill('SIGKILL');
         } catch (_) {}
-        resolve(true);
+        resolve({ reachable: true, healthJson });
       } catch (_) {}
     }
     child.stdout.on('data', (chunk) => {
@@ -124,7 +247,7 @@ function getGatewayReachableViaHealth() {
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
-        resolve(false);
+        resolve({ reachable: false, healthJson: null });
       }
     });
     child.on('close', () => {
@@ -133,30 +256,44 @@ function getGatewayReachableViaHealth() {
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
-        resolve(false);
+        resolve({ reachable: false, healthJson: null });
       }
     });
   });
 }
+function getGatewayReachableViaHealth() {
+  return withOpenClawQueue(getGatewayReachableViaHealthImpl);
+}
 
-/** 拉取 openclaw health --json，用于通道/聊天工具健康（per-channel probe summaries） */
+/** 拉取 openclaw health --json，用于通道/聊天工具健康。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
 const HEALTH_CMD_TIMEOUT_MS = 12000;
-function getHealthJson() {
+function getHealthJsonImpl() {
+  let tmpDir;
+  let env;
+  try {
+    const isolated = createIsolatedOpenClawEnv();
+    tmpDir = isolated.tmpDir;
+    env = isolated.env;
+  } catch (_) {
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     let raw = '';
     let resolved = false;
+    const done = (result) => {
+      if (resolved) return;
+      resolved = true;
+      cleanupTmpDir(tmpDir);
+      resolve(result);
+    };
     const child = spawn('openclaw', ['health', '--json'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
-      env: process.env,
+      env,
     });
     const timer = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try {
-        child.kill('SIGKILL');
-      } catch (_) {}
-      resolve(null);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      done(null);
     }, HEALTH_CMD_TIMEOUT_MS);
     function tryParse() {
       const start = raw.indexOf('{');
@@ -167,22 +304,16 @@ function getHealthJson() {
         if (raw[i] === '{') depth++;
         if (raw[i] === '}') {
           depth--;
-          if (depth === 0) {
-            end = i;
-            break;
-          }
+          if (depth === 0) { end = i; break; }
         }
       }
       if (end === -1) return;
       try {
         const data = JSON.parse(raw.slice(start, end + 1));
         if (resolved) return;
-        resolved = true;
         clearTimeout(timer);
-        try {
-          child.kill('SIGKILL');
-        } catch (_) {}
-        resolve(data);
+        try { child.kill('SIGKILL'); } catch (_) {}
+        done(data);
       } catch (_) {}
     }
     child.stdout.on('data', (chunk) => {
@@ -191,43 +322,47 @@ function getHealthJson() {
       tryParse();
     });
     child.stderr.on('data', () => {});
-    child.on('error', () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve(null);
-      }
-    });
+    child.on('error', () => { done(null); });
     child.on('close', () => {
       if (resolved) return;
       tryParse();
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve(null);
-      }
+      if (!resolved) done(null);
     });
   });
 }
+function getHealthJson() {
+  return withOpenClawQueue(getHealthJsonImpl);
+}
 
-/** 拉取 openclaw models status --json，用于模型健康（可用性/鉴权） */
-function getModelsStatusJson() {
+/** 拉取 openclaw models status --json，用于模型健康。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
+function getModelsStatusJsonImpl() {
+  let tmpDir;
+  let env;
+  try {
+    const isolated = createIsolatedOpenClawEnv();
+    tmpDir = isolated.tmpDir;
+    env = isolated.env;
+  } catch (_) {
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 10000);
     let raw = '';
     let resolved = false;
+    const done = (result) => {
+      if (resolved) return;
+      resolved = true;
+      cleanupTmpDir(tmpDir);
+      resolve(result);
+    };
     const child = spawn('openclaw', ['models', 'status', '--json'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
-      env: process.env,
+      env,
     });
     const timer = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try {
-        child.kill('SIGKILL');
-      } catch (_) {}
-      resolve(null);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      done(null);
     }, timeoutMs);
     function tryParse() {
       const start = raw.indexOf('{');
@@ -238,22 +373,16 @@ function getModelsStatusJson() {
         if (raw[i] === '{') depth++;
         if (raw[i] === '}') {
           depth--;
-          if (depth === 0) {
-            end = i;
-            break;
-          }
+          if (depth === 0) { end = i; break; }
         }
       }
       if (end === -1) return;
       try {
         const data = JSON.parse(raw.slice(start, end + 1));
         if (resolved) return;
-        resolved = true;
         clearTimeout(timer);
-        try {
-          child.kill('SIGKILL');
-        } catch (_) {}
-        resolve(data);
+        try { child.kill('SIGKILL'); } catch (_) {}
+        done(data);
       } catch (_) {}
     }
     child.stdout.on('data', (chunk) => {
@@ -262,23 +391,16 @@ function getModelsStatusJson() {
       tryParse();
     });
     child.stderr.on('data', () => {});
-    child.on('error', () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve(null);
-      }
-    });
+    child.on('error', () => { done(null); });
     child.on('close', () => {
       if (resolved) return;
       tryParse();
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve(null);
-      }
+      if (!resolved) done(null);
     });
   });
+}
+function getModelsStatusJson() {
+  return withOpenClawQueue(getModelsStatusJsonImpl);
 }
 
 /** 从 health JSON 中归一化出 channelHealth 数组（兼容多种字段名与嵌套结构） */
@@ -333,27 +455,92 @@ function normalizeModelHealthFromModelsStatus(modelsJson) {
 const TOKEN_CUMULATIVE_STATE_FILE = path.join(__dirname, 'token-cumulative-state.json');
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
 
-/** 从 OpenClaw 配置文件收集所有模型 ID（models.providers、agents.defaults.models、agents.list[].model） */
-function getModelIdsFromOpenClawConfig() {
-  const ids = new Set();
-  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
-  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
-  let raw;
+// 完全移除文件复制，改为纯内存缓存
+let openclawConfigCache = { 
+  config: null,
+  lastReadTime: 0,
+  readError: null
+};
+
+/** 
+ * 直接从 OpenClaw 源文件读取配置到内存，绝不写入任何文件
+ * 每 30 秒最多读取一次源文件，避免频繁 I/O
+ */
+function refreshOpenClawConfig() {
+  const now = Date.now();
+  // 缓存有效期 30 秒
+  const CACHE_TTL_MS = 30000;
+  
+  // 如果缓存有效且有配置，直接返回
+  if (openclawConfigCache.config && (now - openclawConfigCache.lastReadTime) < CACHE_TTL_MS) {
+    return;
+  }
+  
+  // 直接从源文件读取
+  const srcPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+  const fallbackSrc = path.join(OPENCLAW_DIR, 'clawdbot.json');
+  
+  let config = null;
+  let readError = null;
+  
   try {
-    raw = fs.readFileSync(configPath, 'utf-8');
-  } catch (_) {
+    const content = fs.readFileSync(srcPath, 'utf-8');
+    config = JSON.parse(content);
+    readError = null;
+  } catch (err) {
     try {
-      raw = fs.readFileSync(fallbackPath, 'utf-8');
-    } catch (__) {
-      return [];
+      const content = fs.readFileSync(fallbackSrc, 'utf-8');
+      config = JSON.parse(content);
+      readError = null;
+    } catch (fallbackErr) {
+      readError = fallbackErr.message;
+      config = {}; // 读取失败时使用空配置
     }
   }
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (_) {
-    return [];
+  
+  openclawConfigCache = {
+    config: config && typeof config === 'object' ? config : {},
+    lastReadTime: now,
+    readError
+  };
+  
+  if (readError && process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+    console.warn('[writer] 读取 OpenClaw 配置失败:', readError);
   }
+}
+
+/** 返回当前内存中的 OpenClaw 配置（由 refreshOpenClawConfig 填充）。不读源文件。 */
+function getCachedOpenClawConfig() {
+  // 确保配置已加载
+  if (!openclawConfigCache.config) {
+    refreshOpenClawConfig();
+  }
+  return openclawConfigCache.config || {};
+}
+
+/** 为 openclaw 子进程创建临时配置目录（仅含 openclaw.json 副本），子进程任何写入不会触碰 ~/.openclaw */
+function createIsolatedOpenClawEnv() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-'));
+  try {
+    const config = getCachedOpenClawConfig();
+    fs.writeFileSync(path.join(tmpDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf-8');
+    return { env: { ...process.env, OPENCLAW_DIR: tmpDir }, tmpDir };
+  } catch (e) {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    throw e;
+  }
+}
+
+function cleanupTmpDir(tmpDir) {
+  try {
+    if (tmpDir && fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch (_) {}
+}
+
+/** 从 OpenClaw 配置文件收集所有模型 ID（models.providers、agents.defaults.models、agents.list[].model） */
+function getModelIdsFromOpenClawConfig() {
+  const config = getCachedOpenClawConfig();
+  const ids = new Set();
   const providers = config.models && config.models.providers;
   if (providers && typeof providers === 'object') {
     for (const [provName, prov] of Object.entries(providers)) {
@@ -382,26 +569,9 @@ function getModelIdsFromOpenClawConfig() {
   return Array.from(ids).sort();
 }
 
-/** 从 OpenClaw 配置读取每个 Agent 使用的模型 ID（agents.list[].model，缺省用 agents.defaults.model.primary） */
+/** 从 OpenClaw 配置（缓存）读取每个 Agent 使用的模型 ID */
 function getAgentModelFromOpenClawConfig() {
-  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
-  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
-  let raw;
-  try {
-    raw = fs.readFileSync(configPath, 'utf-8');
-  } catch (_) {
-    try {
-      raw = fs.readFileSync(fallbackPath, 'utf-8');
-    } catch (__) {
-      return {};
-    }
-  }
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (_) {
-    return {};
-  }
+  const config = getCachedOpenClawConfig();
   const defaultModel = (config.agents && config.agents.defaults && config.agents.defaults.model && config.agents.defaults.model.primary)
     ? config.agents.defaults.model.primary
     : null;
@@ -415,26 +585,30 @@ function getAgentModelFromOpenClawConfig() {
   return out;
 }
 
-/** 从 OpenClaw 配置读取每个 Agent 绑定的通道（bindings[].agentId + match.channel），用于仪表盘展示对接的聊天工具 */
-function getAgentChannelsFromConfig() {
-  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
-  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
-  let raw;
-  try {
-    raw = fs.readFileSync(configPath, 'utf-8');
-  } catch (_) {
-    try {
-      raw = fs.readFileSync(fallbackPath, 'utf-8');
-    } catch (__) {
-      return {};
+/** 从 OpenClaw 配置（缓存）按协作圈计算每个 Agent 的分组 */
+function getAgentGroupFromOpenClawConfig() {
+  const config = getCachedOpenClawConfig();
+  const out = {};
+  const agentList = config.agents && config.agents.list;
+  if (!Array.isArray(agentList)) return out;
+  for (const a of agentList) {
+    if (!a || !a.id) continue;
+    const allow = a.subagents && a.subagents.allowAgents;
+    if (!Array.isArray(allow)) continue;
+    const circleName = (a.name && String(a.name).trim()) || a.id;
+    if (!out[a.id]) out[a.id] = circleName;
+    for (const id of allow) {
+      if (id == null || String(id) === '*') continue;
+      const sid = String(id).trim();
+      if (sid && !out[sid]) out[sid] = circleName;
     }
   }
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (_) {
-    return {};
-  }
+  return out;
+}
+
+/** 从 OpenClaw 配置（缓存）读取每个 Agent 绑定的通道，用于仪表盘展示 */
+function getAgentChannelsFromConfig() {
+  const config = getCachedOpenClawConfig();
   const out = {};
   const bindings = config.bindings;
   if (Array.isArray(bindings)) {
@@ -450,26 +624,9 @@ function getAgentChannelsFromConfig() {
   return out;
 }
 
-/** 从 OpenClaw 配置读取模型列表摘要（用于仪表盘「模型列表」：id、name、contextWindow、maxTokens、reasoning） */
+/** 从 OpenClaw 配置（缓存）读取模型列表摘要 */
 function getModelsSummaryFromConfig() {
-  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
-  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
-  let raw;
-  try {
-    raw = fs.readFileSync(configPath, 'utf-8');
-  } catch (_) {
-    try {
-      raw = fs.readFileSync(fallbackPath, 'utf-8');
-    } catch (__) {
-      return [];
-    }
-  }
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (_) {
-    return [];
-  }
+  const config = getCachedOpenClawConfig();
   const list = [];
   const providers = config.models && config.models.providers;
   if (providers && typeof providers === 'object') {
@@ -493,26 +650,119 @@ function getModelsSummaryFromConfig() {
   return list;
 }
 
-/** 从 OpenClaw 配置读取插件/技能摘要（plugins.entries + skills.entries，用于仪表盘「插件/技能」） */
-function getPluginsSummaryFromConfig() {
-  const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
-  const fallbackPath = path.join(OPENCLAW_DIR, 'clawdbot.json');
-  let raw;
+/** 从 OpenClaw 配置（缓存）读取默认模型与回退列表 */
+function getDefaultModelFromConfig() {
+  const config = getCachedOpenClawConfig();
   try {
-    raw = fs.readFileSync(configPath, 'utf-8');
+    const def = config.agents && config.agents.defaults && config.agents.defaults.model;
+    const defaultModel = (def && def.primary) ? def.primary : null;
+    const fallbackModels = Array.isArray(def && def.fallbacks) ? def.fallbacks : [];
+    return { defaultModel, fallbackModels };
   } catch (_) {
-    try {
-      raw = fs.readFileSync(fallbackPath, 'utf-8');
-    } catch (__) {
-      return { plugins: { enabled: [], disabled: [] }, skills: { enabled: [], disabled: [] } };
+    return { defaultModel: null, fallbackModels: [] };
+  }
+}
+
+/** 运行 openclaw <args> 并从 stdout 解析 JSON。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
+function runOpenClawJsonCommandImpl(args) {
+  let tmpDir;
+  let env;
+  try {
+    const isolated = createIsolatedOpenClawEnv();
+    tmpDir = isolated.tmpDir;
+    env = isolated.env;
+  } catch (_) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 20000);
+    let raw = '';
+    let resolved = false;
+    const done = (result) => {
+      if (resolved) return;
+      resolved = true;
+      cleanupTmpDir(tmpDir);
+      resolve(result);
+    };
+    const child = spawn('openclaw', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env,
+    });
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (_) {}
+      done(null);
+    }, timeoutMs);
+    function tryParse() {
+      const start = raw.indexOf('{');
+      if (start === -1) return;
+      let depth = 0;
+      let end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        if (raw[i] === '}') {
+          depth--;
+          if (depth === 0) { end = i; break; }
+        }
+      }
+      if (end === -1) return;
+      try {
+        const data = JSON.parse(raw.slice(start, end + 1));
+        if (resolved) return;
+        clearTimeout(timer);
+        try { child.kill('SIGKILL'); } catch (_) {}
+        done(data);
+      } catch (_) {}
     }
-  }
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (_) {
-    return { plugins: { enabled: [], disabled: [] }, skills: { enabled: [], disabled: [] } };
-  }
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 1024 * 1024) raw = raw.slice(-512 * 1024);
+      tryParse();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', () => { done(null); });
+    child.on('close', () => {
+      if (resolved) return;
+      tryParse();
+      if (!resolved) done(null);
+    });
+  });
+}
+function runOpenClawJsonCommand(args) {
+  return withOpenClawQueue(() => runOpenClawJsonCommandImpl(args));
+}
+
+/** 从 openclaw plugins list --json / skills list --json 获取完整插件与技能列表（用于仪表盘「插件/技能」） */
+function getPluginsSummaryFromCli() {
+  return Promise.all([
+    runOpenClawJsonCommand(['plugins', 'list', '--json']),
+    runOpenClawJsonCommand(['skills', 'list', '--json']),
+  ]).then(([pluginsOut, skillsOut]) => {
+    const pluginsEnabled = [];
+    const pluginsDisabled = [];
+    const pl = pluginsOut && Array.isArray(pluginsOut.plugins) ? pluginsOut.plugins : [];
+    for (const p of pl) {
+      const id = p.id || p.name || '';
+      if (!id) continue;
+      if (p.enabled === true) pluginsEnabled.push(id);
+      else pluginsDisabled.push(id);
+    }
+    const skillsEnabled = [];
+    const skillsDisabled = [];
+    const sl = skillsOut && Array.isArray(skillsOut.skills) ? skillsOut.skills : [];
+    for (const s of sl) {
+      const name = s.name || s.id || '';
+      if (!name) continue;
+      if (s.disabled === true) skillsDisabled.push(name);
+      else skillsEnabled.push(name);
+    }
+    return { plugins: { enabled: pluginsEnabled, disabled: pluginsDisabled }, skills: { enabled: skillsEnabled, disabled: skillsDisabled } };
+  }).catch(() => null);
+}
+
+/** 从 OpenClaw 配置（缓存）读取插件/技能摘要，CLI 不可用时的回退 */
+function getPluginsSummaryFromConfig() {
+  const config = getCachedOpenClawConfig();
   const pluginsEnabled = [];
   const pluginsDisabled = [];
   const pe = config.plugins && config.plugins.entries;
@@ -544,8 +794,9 @@ const DEFAULT_COST_CONFIG = {
     'google/gemini-2.0-flash': { inputPerM: 0.1, outputPerM: 0.4 },
   },
 };
-const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '5000', 10) || 5000;
-const COMMAND_TIMEOUT_MS = parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '5000', 10) || 5000;
+const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '3000', 10) || 3000;
+/** openclaw CLI 命令超时（毫秒）。慢环境或 Agent 多时可设 OPENCLAW_MONITOR_TIMEOUT_MS=60000 等 */
+const COMMAND_TIMEOUT_MS = Math.max(5000, parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '30000', 10) || 30000);
 const ACTIVE_AGE_MS = 120000; // 2 分钟内有活动视为 thinking
 const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
@@ -553,12 +804,14 @@ const PREVIEW_TEXT_LEN = 120; // 每条消息预览最大字符
 const PREVIEW_MESSAGES = 4; // 每个会话保留最近几条消息预览
 const REDACT_PATHS = process.env.OPENCLAW_MONITOR_REDACT_PATHS === '1'; // 为 1 时不输出本机绝对路径（workspaceDir、gateway.url 等）
 const MEMORY_ENABLED = process.env.OPENCLAW_MONITOR_NO_MEMORY !== '1'; // 为 1 时关闭角色记忆拉取
-const MEMORY_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_MEMORY_INTERVAL_MS || '30000', 10) || 30000; // 角色记忆单独轮询间隔，默认 30s，避免阻塞主轮询
+const MEMORY_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_MEMORY_INTERVAL_MS || '60000', 10) || 60000; // 增加到 60 秒，避免频繁超时
 const MEMORY_LIMIT = Math.min(100, Math.max(5, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_LIMIT || '30', 10) || 30)); // 每个 scope 最多拉取条数
+/** 同时拉取记忆的 scope 数量上限，避免多 Agent 时并发 openclaw 进程爆炸 */
+const MEMORY_CONCURRENCY = Math.min(5, Math.max(1, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_CONCURRENCY || '2', 10) || 2));
 const MEMORY_TEXT_LEN = 200; // 每条记忆预览最大字符，超出截断
 
-// 按索引循环使用，支持任意数量 Agent
-const COLOR_PALETTE = [
+// memory 命令超时（毫秒），多 Agent 或慢环境可调大；默认 30s
+const MEMORY_COMMAND_TIMEOUT_MS = Math.max(10000, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_TIMEOUT_MS || '30000', 10) || 30000);const COLOR_PALETTE = [
   'bg-violet-500',
   'bg-blue-500',
   'bg-emerald-500',
@@ -594,6 +847,7 @@ function safeWriteStatusFile(data) {
   if (statusFileWriteInProgress) return false;
   statusFileWriteInProgress = true;
   try {
+    ensureNotOpenClawConfigPath(OUTPUT_FILE);
     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(data, null, 2));
     return true;
   } finally {
@@ -610,14 +864,18 @@ function readSessionContentPreview(sessionDir, sessionId) {
       return [{ role: 'system', text: '[日志文件过大，跳过预览以保护性能]' }];
     }
   } catch (e) {
-    if (SESSION_CONTENT_PREVIEW_MAX > 0) console.warn('[writer] readSessionContentPreview stat:', e.message || e);
+    if (SESSION_CONTENT_PREVIEW_MAX > 0 && e.code !== 'ENOENT' && process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] readSessionContentPreview stat:', e.message || e);
+    }
     return null;
   }
   let content;
   try {
     content = fs.readFileSync(jsonlPath, 'utf-8');
   } catch (e) {
-    if (SESSION_CONTENT_PREVIEW_MAX > 0) console.warn('[writer] readSessionContentPreview readFile:', e.message || e);
+    if (SESSION_CONTENT_PREVIEW_MAX > 0 && process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] readSessionContentPreview readFile:', e.message || e);
+    }
     return null;
   }
   const lines = content.trim().split('\n').filter(Boolean);
@@ -637,7 +895,9 @@ function readSessionContentPreview(sessionDir, sessionId) {
         text: text.length > PREVIEW_TEXT_LEN ? text.slice(0, PREVIEW_TEXT_LEN) + '…' : text,
       });
     } catch (e) {
-      if (SESSION_CONTENT_PREVIEW_MAX > 0) console.warn('[writer] readSessionContentPreview parse line:', e.message || e);
+      if (SESSION_CONTENT_PREVIEW_MAX > 0 && process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+        console.warn('[writer] readSessionContentPreview parse line:', e.message || e);
+      }
     }
   }
   // 当前 messages 为 [最新, 次新, ...]，已是最新在前，直接返回
@@ -727,6 +987,7 @@ function getSystemInfo() {
 /**
  * 拉取 openclaw status --json。使用 spawn + 流式读取，读到完整 JSON 后立即 kill 子进程，
  * 避免在安装插件（如 openclaw-self-healing）后 CLI 加载插件导致进程不退出、execSync 超时无数据。
+ * 注意：此处必须使用真实 OPENCLAW_DIR（需读 agents/sessions），超时或失败时 openclaw 子进程可能在 ~/.openclaw 写临时文件。
  * @see https://github.com/openclaw/openclaw/issues/11843
  */
 function getStatusJson() {
@@ -886,26 +1147,42 @@ function parseMemoryListOutput(raw, scopeForLog) {
   }
 }
 
-/** 异步拉取某 scope 的记忆（不阻塞主轮询） */
+/** 异步拉取某 scope 的记忆。在隔离的临时目录下执行 openclaw，避免失败时在 ~/.openclaw 生成临时文件。 */
 function getMemoryForScopeAsync(scope) {
-  return new Promise((resolve) => {
-    exec(
-      `openclaw memory-pro list --scope "${scope}" --json --limit ${MEMORY_LIMIT} 2>/dev/null`,
-      { encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024, timeout: COMMAND_TIMEOUT_MS, env: process.env },
-      (err, stdout) => {
-        if (err) {
-          console.warn('[writer] memory', scope, 'exec err', err.message || err);
-          resolve([]);
-          return;
+  let tmpDir;
+  try {
+    const { env, tmpDir: dir } = createIsolatedOpenClawEnv();
+    tmpDir = dir;
+    const timeoutMs = COMMAND_TIMEOUT_MS;
+    return new Promise((resolve) => {
+      const cleanup = () => {
+        cleanupTmpDir(tmpDir);
+        tmpDir = null;
+      };
+      const timer = setTimeout(cleanup, timeoutMs + 10000);
+      exec(
+        `openclaw memory-pro list --scope "${scope}" --json --limit ${MEMORY_LIMIT} 2>/dev/null`,
+        { encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024, timeout: timeoutMs, env },
+        (err, stdout) => {
+          clearTimeout(timer);
+          cleanup();
+          if (err) {
+            if (MEMORY_DEBUG) console.warn('[writer] memory', scope, 'exec err', err.message || err);
+            resolve([]);
+            return;
+          }
+          const raw = stdout || '';
+          if (MEMORY_DEBUG || raw.length < 10) console.log('[writer] memory', scope, 'stdoutLen=', raw.length, 'head=', raw.slice(0, 100));
+          const entries = parseMemoryListOutput(raw, scope);
+          if (MEMORY_DEBUG || entries.length > 0) console.log('[writer] memory', scope, '->', entries.length, '条');
+          resolve(entries);
         }
-        const raw = stdout || '';
-        if (MEMORY_DEBUG || raw.length < 10) console.log('[writer] memory', scope, 'stdoutLen=', raw.length, 'head=', raw.slice(0, 100));
-        const entries = parseMemoryListOutput(raw, scope);
-        console.log('[writer] memory', scope, '->', entries.length, '条');
-        resolve(entries);
-      }
-    );
-  });
+      );
+    });
+  } catch (e) {
+    cleanupTmpDir(tmpDir);
+    return Promise.resolve([]);
+  }
 }
 
 async function updateStatus() {
@@ -921,8 +1198,10 @@ async function updateStatus() {
       prev.gateway.error = 'openclaw status 执行失败';
       prev.system = getSystemInfo();
       prev.error = { message: 'Gateway status fetch failed', time: new Date().toISOString() };
-      // 原子写入
+      // 原子写入（禁止写入 ~/.openclaw）
       const tempFile = OUTPUT_FILE + '.tmp';
+      ensureNotOpenClawConfigPath(tempFile);
+      ensureNotOpenClawConfigPath(OUTPUT_FILE);
       fs.writeFileSync(tempFile, JSON.stringify(prev, null, 2));
       fs.renameSync(tempFile, OUTPUT_FILE);
     } catch (e) {
@@ -1023,6 +1302,7 @@ async function updateStatus() {
     tokenCumulativeGlobal += rec.cumulativeTokens;
   });
   try {
+    ensureNotOpenClawConfigPath(TOKEN_CUMULATIVE_STATE_FILE);
     fs.writeFileSync(TOKEN_CUMULATIVE_STATE_FILE, JSON.stringify(tokenState, null, 2), 'utf-8');
   } catch (e) {
     console.warn('[writer] token-cumulative-state 写入失败:', e.message || e);
@@ -1226,6 +1506,7 @@ const initial = {
   memoryGlobal: null,
 };
 if (!fs.existsSync(OUTPUT_FILE)) {
+  ensureNotOpenClawConfigPath(OUTPUT_FILE);
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(initial, null, 2));
 }
 
@@ -1235,7 +1516,7 @@ console.log('输出:', OUTPUT_FILE);
 console.log('间隔:', CHECK_INTERVAL_MS, 'ms');
 if (REDACT_PATHS) console.log('路径脱敏: 已开启');
 if (SESSION_CONTENT_PREVIEW_MAX === 0) console.log('会话内容预览: 已关闭');
-if (MEMORY_ENABLED) console.log('角色记忆: 已开启 (异步, 间隔', MEMORY_INTERVAL_MS, 'ms, 每 scope 最多', MEMORY_LIMIT, '条)');
+if (MEMORY_ENABLED) console.log('角色记忆: 仅按需拉取（点击仪表盘「记忆」时请求，不轮询向量库）');
 else console.log('角色记忆: 已关闭');
 
 const SERVER_PORT = parseInt(process.env.OPENCLAW_MONITOR_PORT || '3880', 10) || 3880;
@@ -1337,6 +1618,7 @@ function readCostConfig() {
 function writeCostConfig(data) {
   const out = data && typeof data.models === 'object' ? { models: data.models } : DEFAULT_COST_CONFIG;
   try {
+    ensureNotOpenClawConfigPath(COST_CONFIG_FILE);
     fs.writeFileSync(COST_CONFIG_FILE, JSON.stringify(out, null, 2), 'utf-8');
     console.log('[writer] cost-config 已保存');
   } catch (e) {
@@ -1415,7 +1697,4 @@ setInterval(() => {
   updateStatus().finally(() => { updateStatusRunning = false; });
 }, CHECK_INTERVAL_MS);
 updateStatus();
-if (MEMORY_ENABLED) {
-  setInterval(updateMemory, MEMORY_INTERVAL_MS);
-  setTimeout(updateMemory, 2000);
-}
+// 不再定时拉取记忆，仅在用户点击仪表盘「记忆」时通过 GET /memory?scope= 按需调用向量库

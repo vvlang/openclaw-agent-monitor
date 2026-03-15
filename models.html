@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>模型列表 · OpenClaw</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* OpenClaw-bot-review 同款配色与卡片风格 */
+        :root {
+            --bg: #0f172a;
+            --card: #1e293b;
+            --border: #334155;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --green: #4ade80;
+            --orange: #fb923c;
+        }
+        html { -webkit-text-size-adjust: 100%; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+        .tap-target { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+        .scroll-touch { -webkit-overflow-scrolling: touch; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 0.5rem; }
+        .btn-accent { background: rgba(56, 189, 248, 0.2); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.3); }
+        .btn-accent:hover:not(:disabled) { background: rgba(56, 189, 248, 0.4); }
+        .btn-accent:disabled { background: rgba(100, 116, 139, 0.2); color: var(--text-muted); cursor: wait; }
+        .models-table { border-collapse: collapse; width: 100%; min-width: 700px; font-size: 0.8125rem; }
+        .models-table th, .models-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        .models-table th { font-weight: 600; color: var(--text-muted); text-align: left; white-space: nowrap; }
+        .models-table th.num, .models-table td.num { text-align: right; }
+        .models-table th.center, .models-table td.center { text-align: center; }
+        .models-table tbody tr:hover { background: rgba(51, 65, 85, 0.25); }
+        .models-table .col-model { width: 18%; }
+        .models-table .col-ctx { width: 8%; }
+        .models-table .col-max { width: 8%; }
+        .models-table .col-reason { width: 6%; }
+        .models-table .col-avail { width: 6%; }
+        .models-table .col-token { width: 10%; }
+        .models-table .col-used { width: 20%; }
+        .models-table .col-test { width: 14%; }
+    </style>
+</head>
+<body class="min-h-screen overflow-y-auto overflow-x-hidden flex flex-col scroll-touch">
+
+    <header class="border-b border-[var(--border)] px-4 py-3 md:px-6 md:py-4 shrink-0">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex items-center gap-4 min-w-0">
+                <a href="agent-dashboard.html" class="text-[var(--text-muted)] hover:text-[var(--text)] whitespace-nowrap transition">← 返回总览</a>
+                <h1 class="text-lg md:text-xl font-bold truncate">模型列表</h1>
+                <span id="provider-count" class="text-[var(--text-muted)] text-sm hidden md:inline">共 0 个 Provider</span>
+            </div>
+            <div class="flex items-center gap-3 shrink-0">
+                <span id="last-update" class="text-xs text-[var(--text-muted)] font-mono">—</span>
+                <button type="button" id="btn-test-all" class="btn-accent tap-target text-xs font-medium px-3 py-1.5 rounded cursor-pointer transition">一键测试全部</button>
+                <button type="button" id="btn-refresh" class="tap-target text-xs px-3 py-1.5 rounded border border-[var(--border)] bg-[var(--card)] text-[var(--text)] hover:bg-[var(--border)] transition">刷新</button>
+                <label class="text-[var(--text-muted)] text-xs flex items-center gap-1.5 whitespace-nowrap">
+                    <span>间隔</span>
+                    <select id="refresh-interval" class="bg-[var(--card)] border border-[var(--border)] rounded px-2 py-1 text-[var(--text)] text-xs">
+                        <option value="0">手动</option>
+                        <option value="5">5 秒</option>
+                        <option value="10" selected>10 秒</option>
+                        <option value="30">30 秒</option>
+                        <option value="60">1 分钟</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 p-4 md:p-6 overflow-x-auto">
+        <div class="max-w-[1400px] mx-auto space-y-4">
+            <!-- 默认模型 / 回退模型（与 bot-review 一致） -->
+            <div id="defaults-block" class="card p-4 hidden">
+                <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+                    <span class="text-[var(--text-muted)]">默认模型：</span>
+                    <span id="default-model-value" class="font-mono">—</span>
+                    <span id="fallbacks-wrap" class="hidden">
+                        <span class="text-[var(--text-muted)]">回退模型：</span>
+                        <span id="fallbacks-value" class="font-mono"></span>
+                    </span>
+                </div>
+            </div>
+            <div id="models-content">
+                <div class="text-[var(--text-muted)] italic">加载中...</div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const DATA_FILE = 'agent-status.json';
+        const modelsContent = document.getElementById('models-content');
+        const lastUpdateEl = document.getElementById('last-update');
+        const btnRefresh = document.getElementById('btn-refresh');
+        const btnTestAll = document.getElementById('btn-test-all');
+        const refreshIntervalSelect = document.getElementById('refresh-interval');
+        const defaultsBlock = document.getElementById('defaults-block');
+        const defaultModelValue = document.getElementById('default-model-value');
+        const fallbacksWrap = document.getElementById('fallbacks-wrap');
+        const fallbacksValue = document.getElementById('fallbacks-value');
+        const providerCountEl = document.getElementById('provider-count');
+        let refreshTimer = null;
+        let currentData = null;
+
+        function escapeHtml(s) {
+            if (s == null) return '';
+            var div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
+        function formatMs(ms) {
+            if (ms == null || ms === 0) return '-';
+            if (ms < 1000) return ms + 'ms';
+            return (ms / 1000).toFixed(1) + 's';
+        }
+
+        function renderModels(data) {
+            currentData = data;
+            if (!data) {
+                modelsContent.innerHTML = '<div class="text-[var(--text-muted)] italic">无数据</div>';
+                return;
+            }
+            var list = data.modelsSummary;
+            if (!list || !list.length) {
+                modelsContent.innerHTML = '<div class="text-[var(--text-muted)] italic">暂无模型配置</div>';
+                if (defaultsBlock) defaultsBlock.classList.add('hidden');
+                return;
+            }
+            var tokenByModel = {};
+            if (Array.isArray(data.tokenByModel)) {
+                data.tokenByModel.forEach(function (row) {
+                    if (row && row.modelId != null) tokenByModel[row.modelId] = row.cumulative != null ? row.cumulative : 0;
+                });
+            }
+            var defaultModel = data.defaultModel || '';
+            var fallbackModels = Array.isArray(data.fallbackModels) ? data.fallbackModels : [];
+
+            if (defaultModel || (fallbackModels && fallbackModels.length)) {
+                defaultsBlock.classList.remove('hidden');
+                defaultModelValue.textContent = defaultModel ? ('🧠 ' + defaultModel) : '—';
+                if (fallbackModels && fallbackModels.length) {
+                    fallbacksWrap.classList.remove('hidden');
+                    fallbacksValue.textContent = fallbackModels.map(function (f) { return '🔄 ' + f; }).join(' ');
+                } else {
+                    fallbacksWrap.classList.add('hidden');
+                }
+            } else {
+                defaultsBlock.classList.add('hidden');
+            }
+
+            var byProvider = {};
+            list.forEach(function (m) {
+                var p = m.provider || 'default';
+                if (!byProvider[p]) byProvider[p] = [];
+                byProvider[p].push(m);
+            });
+            var providerOrder = Object.keys(byProvider).sort();
+            if (providerCountEl) providerCountEl.textContent = '共 ' + providerOrder.length + ' 个 Provider';
+
+            function formatTokenShort(n) {
+                if (n == null || n === 0) return '—';
+                if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+                if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+                return String(n);
+            }
+
+            var html = '';
+            providerOrder.forEach(function (providerId) {
+                var models = byProvider[providerId];
+                var usedByUniq = [];
+                var seen = {};
+                models.forEach(function (m) {
+                    (m.usedBy || []).forEach(function (a) {
+                        var k = (a.id || a.name || '');
+                        if (k && !seen[k]) { seen[k] = true; usedByUniq.push(a); }
+                    });
+                });
+                html += '<section class="card overflow-hidden">';
+                html += '<div class="px-4 py-3 border-b border-[var(--border)]">';
+                html += '<span class="font-semibold text-[var(--text)]">' + escapeHtml(providerId) + '</span>';
+                if (usedByUniq.length > 0) {
+                    html += ' <span class="text-[var(--text-muted)] text-sm ml-2">使用于 </span>';
+                    html += usedByUniq.map(function (a) { return '<span class="text-[var(--text)]">' + escapeHtml(a.name || a.id) + '</span>'; }).join('、');
+                }
+                html += '</div>';
+                html += '<div class="overflow-x-auto"><table class="models-table"><thead><tr>' +
+                    '<th class="col-model">模型 ID</th>' +
+                    '<th class="col-model">名称</th>' +
+                    '<th class="col-ctx num">上下文</th>' +
+                    '<th class="col-max num">maxOut</th>' +
+                    '<th class="col-reason center">推理</th>' +
+                    '<th class="col-avail center">可用</th>' +
+                    '<th class="col-token num">累计 Token</th>' +
+                    '<th class="col-used">使用于</th>' +
+                    '<th class="col-test center">测试</th></tr></thead><tbody>';
+                models.forEach(function (m) {
+                    var name = (m.id && m.id.indexOf('/') >= 0) ? m.id.split('/').pop() : (m.id || m.name || '');
+                    var ctx = m.contextWindow != null ? (m.contextWindow >= 1000 ? (m.contextWindow / 1000) + 'K' : m.contextWindow) : '—';
+                    var maxT = m.maxTokens != null ? m.maxTokens : '—';
+                    var reason = m.reasoning ? '✅' : '❌';
+                    var safeId = (m.id || '').replace(/[^a-z0-9_-]/gi, '_');
+                    var availId = 'avail-' + safeId;
+                    var resultId = 'test-result-' + safeId;
+                    var tokens = tokenByModel[m.id];
+                    var tokenStr = tokens != null ? formatTokenShort(tokens) : '—';
+                    var usedBy = (m.usedBy && m.usedBy.length) ? m.usedBy.map(function (a) { return escapeHtml(a.name || a.id); }).join(', ') : '—';
+                    html += '<tr>' +
+                        '<td class="col-model truncate font-mono text-[var(--text)]" title="' + escapeHtml(m.id || '') + '">' + escapeHtml(m.id || '') + '</td>' +
+                        '<td class="col-model truncate text-[var(--text-muted)]" title="' + escapeHtml(m.name || '') + '">' + escapeHtml(m.name || name) + '</td>' +
+                        '<td class="col-ctx num">' + ctx + '</td>' +
+                        '<td class="col-max num">' + maxT + '</td>' +
+                        '<td class="col-reason center">' + reason + '</td>' +
+                        '<td id="' + availId + '" class="col-avail center text-[var(--text-muted)]" title="点击测试后显示">—</td>' +
+                        '<td class="col-token num">' + tokenStr + '</td>' +
+                        '<td class="col-used truncate text-[var(--text-muted)]" title="' + (m.usedBy && m.usedBy.length ? m.usedBy.map(function(a) { return a.name || a.id; }).join(', ') : '') + '">' + usedBy + '</td>' +
+                        '<td class="col-test center"><span class="inline-flex items-center gap-1 flex-nowrap justify-center">' +
+                        '<button type="button" class="model-test-btn btn-accent tap-target px-2 py-1 rounded text-xs font-medium cursor-pointer transition whitespace-nowrap" data-provider="' + escapeHtml(m.provider || '') + '" data-model-id="' + escapeHtml(m.id || '') + '">测试</button>' +
+                        '<span id="' + resultId + '" class="text-xs min-w-[2.5rem] inline-block text-left"></span></span></td>' +
+                        '</tr>';
+                });
+                html += '</tbody></table></div></section>';
+            });
+            modelsContent.innerHTML = html;
+
+            if (lastUpdateEl) lastUpdateEl.textContent = data.lastUpdated ? '更新 ' + new Date(data.lastUpdated).toLocaleTimeString() : '—';
+
+            modelsContent.querySelectorAll('.model-test-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    runTest(btn.getAttribute('data-provider'), btn.getAttribute('data-model-id'), btn);
+                });
+            });
+        }
+
+        function runTest(provider, modelId, btnEl) {
+            var resultEl = document.getElementById('test-result-' + modelId.replace(/[^a-z0-9_-]/gi, '_'));
+            if (resultEl) resultEl.textContent = '…';
+            if (btnEl) btnEl.disabled = true;
+            return fetch('/test-model', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider: provider, modelId: modelId })
+            }).then(function (r) { return r.json();             }).then(function (body) {
+                if (resultEl) {
+                    if (body.ok) resultEl.textContent = '✅ ' + formatMs(body.elapsed);
+                    else resultEl.textContent = '❌ ' + (body.error || '失败').slice(0, 30);
+                    resultEl.style.color = body.ok ? 'var(--green)' : '#f87171';
+                }
+                var availEl = document.getElementById('avail-' + modelId.replace(/[^a-z0-9_-]/gi, '_'));
+                if (availEl) {
+                    if (body && body.ok) {
+                        availEl.innerHTML = '<span class="text-[var(--green)]" title="可用">●</span>';
+                        availEl.className = 'col-avail center';
+                    } else {
+                        availEl.innerHTML = '<span class="text-red-400" title="不可用">●</span>';
+                        availEl.className = 'col-avail center';
+                    }
+                }
+            }).catch(function (e) {
+                if (resultEl) { resultEl.textContent = '❌ ' + ((e && e.message) || '请求失败').slice(0, 20); resultEl.style.color = '#f87171'; }
+                var availEl = document.getElementById('avail-' + modelId.replace(/[^a-z0-9_-]/gi, '_'));
+                if (availEl) {
+                    availEl.innerHTML = '<span class="text-red-400" title="请求失败">●</span>';
+                    availEl.className = 'col-avail center';
+                }
+            }).finally(function () { if (btnEl) btnEl.disabled = false; });
+        }
+
+        function testAllModels() {
+            if (!currentData || !currentData.modelsSummary || !currentData.modelsSummary.length) return;
+            var list = currentData.modelsSummary;
+            var keys = [];
+            var seen = {};
+            list.forEach(function (m) {
+                var k = (m.provider || '') + '/' + (m.id || '');
+                if (k && !seen[k]) { seen[k] = true; keys.push({ provider: m.provider, modelId: m.id }); }
+            });
+            if (keys.length === 0) return;
+            btnTestAll.disabled = true;
+            var i = 0;
+            function next() {
+                if (i >= keys.length) { btnTestAll.disabled = false; return; }
+                var k = keys[i++];
+                var btn = modelsContent.querySelector('.model-test-btn[data-provider="' + k.provider + '"][data-model-id="' + k.modelId + '"]');
+                runTest(k.provider, k.modelId, btn).then(function () { setTimeout(next, 100); });
+            }
+            next();
+        }
+
+        async function fetchData() {
+            try {
+                var response = await fetch(DATA_FILE + '?t=' + Date.now());
+                if (!response.ok) throw new Error('No data');
+                var data = await response.json();
+                renderModels(data);
+            } catch (e) {
+                modelsContent.innerHTML = '<div class="text-red-400">加载失败：' + escapeHtml((e && e.message) || '未知错误') + '</div>';
+            }
+        }
+
+        function scheduleRefresh() {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            var sec = parseInt(refreshIntervalSelect.value, 10);
+            if (sec > 0) refreshTimer = setTimeout(function () { fetchData(); scheduleRefresh(); }, sec * 1000);
+        }
+
+        btnRefresh.addEventListener('click', function () { fetchData(); scheduleRefresh(); });
+        btnTestAll.addEventListener('click', testAllModels);
+        refreshIntervalSelect.addEventListener('change', scheduleRefresh);
+
+        fetchData();
+        scheduleRefresh();
+    </script>
+</body>
+</html>
