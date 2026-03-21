@@ -1068,7 +1068,7 @@ function getSystemInfo() {
   try {
     if (info.ip) {
       // ⚠️ 硬编码命令，切勿从环境变量或外部输入构建命令以防止命令注入
-      const pingCmd = os.platform() === 'darwin' ? 'ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
+      const pingCmd = os.platform() === 'darwin' ? '/sbin/ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
       execSync(pingCmd, { encoding: 'utf-8', timeout: COMMAND_TIMEOUT_MS });
       info.network = '在线';
     } else {
