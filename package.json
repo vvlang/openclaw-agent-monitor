@@ -5,11 +5,16 @@
   "main": "agent-status-writer.js",
   "scripts": {
     "writer": "node agent-status-writer.js",
-    "serve": "npx serve -p 3880 --no-clipboard"
+    "serve": "npx serve -p 3880 --no-clipboard",
+    "import-tokens": "node scripts/import-token-state-to-db.js",
+    "minimax-tokenplan": "node scripts/minimax-tokenplan-remains.js"
   },
   "engines": {
     "node": ">=18"
   },
   "keywords": ["openclaw", "monitor", "dashboard"],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.6.0"
+  }
 }

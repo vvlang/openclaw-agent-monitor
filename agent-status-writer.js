@@ -13,6 +13,7 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const url = require('url');
+const tokenDb = require('./token-db');
 
 /** Gateway 直连探测超时（毫秒），当 status 报离线时用此探测修正 */
 const GATEWAY_PROBE_TIMEOUT_MS = 3000;
@@ -41,7 +42,7 @@ let gatewayProbeCache = { reachable: null, displayUrl: null, at: 0 };
 let openclawQueue = Promise.resolve();
 function withOpenClawQueue(fn) {
   const next = openclawQueue.then(() => fn()).catch((e) => { throw e; });
-  openclawQueue = next.catch(() => {});
+  openclawQueue = next.catch((e) => { console.error('[writer] openclaw queue error:', e && e.message ? e.message : e); });
   return next;
 }
 
@@ -265,6 +266,24 @@ function getGatewayReachableViaHealth() {
   return withOpenClawQueue(getGatewayReachableViaHealthImpl);
 }
 
+/** 通过执行 openclaw --version 获取版本号，输出格式如 "OpenClaw 2026.3.13 (61d171a)"，解析为 "2026.3.13 (61d171a)" */
+function getOpenClawVersionFromCliImpl() {
+  return new Promise((resolve) => {
+    exec('openclaw --version', { timeout: 5000, maxBuffer: 512 }, (err, stdout) => {
+      if (err || !stdout || typeof stdout !== 'string') {
+        resolve(null);
+        return;
+      }
+      const line = stdout.trim().split('\n')[0] || '';
+      const match = line.replace(/^OpenClaw\s+/i, '').trim();
+      resolve(match || null);
+    });
+  });
+}
+function getOpenClawVersionFromCli() {
+  return withOpenClawQueue(getOpenClawVersionFromCliImpl);
+}
+
 /** 拉取 openclaw health --json，用于通道/聊天工具健康。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
 const HEALTH_CMD_TIMEOUT_MS = 12000;
 function getHealthJsonImpl() {
@@ -407,6 +426,13 @@ function getModelsStatusJson() {
 function normalizeChannelHealthFromHealth(healthJson) {
   if (!healthJson || typeof healthJson !== 'object') return [];
   let list = healthJson.channels || healthJson.channelProbes || healthJson.probes || healthJson.probeResults || [];
+  // openclaw health --json 某些版本 channels 为对象：{ dingtalk: {...}, feishu: {...} }
+  if (list && !Array.isArray(list) && typeof list === 'object') {
+    list = Object.entries(list).map(([k, v]) => {
+      if (v && typeof v === 'object') return { channel: k, ...v };
+      return { channel: k, ok: !!v };
+    });
+  }
   if (!Array.isArray(list)) {
     if (healthJson.channelSummary && Array.isArray(healthJson.channelSummary)) {
       list = healthJson.channelSummary.map((ch) => (typeof ch === 'object' && ch != null) ? ch : { channel: ch, ok: true });
@@ -426,8 +452,20 @@ function normalizeChannelHealthFromHealth(healthJson) {
   }
   return list.map((item) => {
     const channel = item.channel || item.name || item.id || item.type || item.channelType || 'unknown';
-    const ok = item.ok === true || item.healthy === true || item.connected === true || item.status === 'ok' || item.success === true;
-    const err = item.error || item.message || item.reason || (ok ? null : '探测失败');
+    const hasRunning = typeof item.running === 'boolean';
+    const hasConfigured = typeof item.configured === 'boolean';
+    const ok =
+      item.ok === true ||
+      item.healthy === true ||
+      item.connected === true ||
+      item.status === 'ok' ||
+      item.success === true ||
+      (hasRunning ? item.running === true : false);
+    let err = item.error || item.message || item.reason || item.lastError || null;
+    if (!ok && !err) {
+      if (hasConfigured && item.configured === true && hasRunning && item.running === false) err = '已配置但未运行';
+      else err = '探测失败';
+    }
     const channelKey = String(channel).toLowerCase();
     return { channel: channelKey, healthy: !!ok, error: err || null };
   });
@@ -509,12 +547,10 @@ function refreshOpenClawConfig() {
   }
 }
 
-/** 返回当前内存中的 OpenClaw 配置（由 refreshOpenClawConfig 填充）。不读源文件。 */
+/** 返回当前内存中的 OpenClaw 配置（由 refreshOpenClawConfig 填充）。内部按 TTL 控制读源文件频率。 */
 function getCachedOpenClawConfig() {
-  // 确保配置已加载
-  if (!openclawConfigCache.config) {
-    refreshOpenClawConfig();
-  }
+  // 每次调用都尝试刷新，refreshOpenClawConfig 内部会根据 TTL 决定是否真正读盘
+  refreshOpenClawConfig();
   return openclawConfigCache.config || {};
 }
 
@@ -522,7 +558,51 @@ function getCachedOpenClawConfig() {
 function createIsolatedOpenClawEnv() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-'));
   try {
-    const config = getCachedOpenClawConfig();
+    const baseConfig = getCachedOpenClawConfig();
+    // 深拷贝，避免改写全局缓存对象
+    const config = JSON.parse(JSON.stringify(baseConfig || {}));
+
+    // 将 plugins.load.paths / installs 中指向 ~/.openclaw 的扩展目录复制到临时目录，并重写路径
+    // 这样 openclaw health/models 在隔离目录执行时仍能加载通道插件（如 dingtalk）。
+    const rewrites = new Map(); // srcAbs -> dstAbs
+    function isUnderOpenClawDir(p) {
+      try {
+        const abs = path.resolve(String(p));
+        const root = path.resolve(OPENCLAW_DIR);
+        return abs === root || abs.startsWith(root + path.sep);
+      } catch (_) {
+        return false;
+      }
+    }
+    function rewritePathIfNeeded(p) {
+      if (!p || typeof p !== 'string') return p;
+      if (!isUnderOpenClawDir(p)) return p;
+      const abs = path.resolve(p);
+      if (rewrites.has(abs)) return rewrites.get(abs);
+      const rel = path.relative(OPENCLAW_DIR, abs);
+      const dst = path.join(tmpDir, rel);
+      rewrites.set(abs, dst);
+      try {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        // 仅复制目录/文件本身；失败则忽略，交给 openclaw 自行报错
+        fs.cpSync(abs, dst, { recursive: true });
+      } catch (_) {}
+      return dst;
+    }
+    // plugins.load.paths
+    if (config.plugins && config.plugins.load && Array.isArray(config.plugins.load.paths)) {
+      config.plugins.load.paths = config.plugins.load.paths.map(rewritePathIfNeeded);
+    }
+    // plugins.installs.*.installPath/sourcePath
+    if (config.plugins && config.plugins.installs && typeof config.plugins.installs === 'object') {
+      for (const k of Object.keys(config.plugins.installs)) {
+        const inst = config.plugins.installs[k];
+        if (!inst || typeof inst !== 'object') continue;
+        if (inst.installPath) inst.installPath = rewritePathIfNeeded(inst.installPath);
+        if (inst.sourcePath) inst.sourcePath = rewritePathIfNeeded(inst.sourcePath);
+      }
+    }
+
     fs.writeFileSync(path.join(tmpDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf-8');
     return { env: { ...process.env, OPENCLAW_DIR: tmpDir }, tmpDir };
   } catch (e) {
@@ -855,8 +935,25 @@ function safeWriteStatusFile(data) {
   }
 }
 
+/** 校验 sessionDir 是否在 OPENCLAW_DIR 安全范围内，防止路径穿越 */
+function isSessionPathSafe(sessionDir) {
+  try {
+    const abs = path.resolve(sessionDir);
+    const root = path.resolve(OPENCLAW_DIR);
+    return abs.startsWith(root + path.sep);
+  } catch (_) {
+    return false;
+  }
+}
+
 /** 读取会话 .jsonl 中真正的最后几条 user/assistant 文本消息（从文件末尾往前扫） */
 function readSessionContentPreview(sessionDir, sessionId) {
+  if (!isSessionPathSafe(sessionDir)) {
+    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn(`[writer] sessionDir rejected by path validation: ${sessionDir}`);
+    }
+    return null;
+  }
   const jsonlPath = path.join(sessionDir, sessionId + '.jsonl');
   try {
     const stats = fs.statSync(jsonlPath);
@@ -1230,7 +1327,7 @@ async function updateStatus() {
     if (recent && recent.percentUsed != null) {
       message += ` · 上下文 ${recent.percentUsed}%`;
     }
-    const modelId = agentModelFromConfig[a.id] != null ? agentModelFromConfig[a.id] : (a.model || null);
+    const modelId = agentModelFromConfig[a.id] != null ? agentModelFromConfig[a.id] : null;
     const boundChannels = Array.isArray(agentChannelsFromConfig[a.id]) ? agentChannelsFromConfig[a.id] : [];
     const group = agentGroupFromConfig[a.id] != null ? agentGroupFromConfig[a.id] : null;
     return {
@@ -1287,6 +1384,12 @@ async function updateStatus() {
         if (delta > 0) {
           rec.cumulativeTokens += delta;
           tokenState.byModel[modelId] = (tokenState.byModel[modelId] || 0) + delta;
+          try {
+            tokenDb.init();
+            tokenDb.insertUsage({ modelId, tokens: delta, agentId: a.id, sessionId });
+          } catch (e) {
+            if (process.env.DEBUG) console.warn('[writer] token-db insertUsage:', e.message || e);
+          }
         }
         rec.lastTotalTokens = totalTokens;
       } else {
@@ -1294,6 +1397,12 @@ async function updateStatus() {
           rec.cumulativeTokens += rec.lastTotalTokens;
           const lastModel = rec.lastModelId || 'unknown';
           tokenState.byModel[lastModel] = (tokenState.byModel[lastModel] || 0) + rec.lastTotalTokens;
+          try {
+            tokenDb.init();
+            tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, agentId: a.id, sessionId: rec.lastSessionId });
+          } catch (e) {
+            if (process.env.DEBUG) console.warn('[writer] token-db insertUsage (flush):', e.message || e);
+          }
         }
         rec.lastSessionId = sessionId;
         rec.lastTotalTokens = totalTokens;
@@ -1329,12 +1438,27 @@ async function updateStatus() {
   });
   const tokenByModel = Object.values(tokenByModelMap).sort((a, b) => (b.cumulative || 0) - (a.cumulative || 0));
 
+  let tokenByVendor = [];
+  let tokenByVendorModel = [];
+  try {
+    tokenDb.init();
+    tokenByVendor = tokenDb.getStatsByVendor();
+    tokenByVendorModel = tokenDb.getStatsByVendorModel();
+  } catch (e) {
+    if (process.env.DEBUG) console.warn('[writer] token-db stats:', e.message || e);
+  }
+
+  function pickVersion(gw) {
+    if (!gw || typeof gw !== 'object') return null;
+    const v = (gw.self && gw.self.version) || gw.version || (gw.self && gw.self.nodeVersion);
+    return v != null && String(v).trim() !== '' ? String(v).trim() : null;
+  }
   let gateway = status.gateway
     ? {
         reachable: !!status.gateway.reachable,
         url: REDACT_PATHS ? null : (status.gateway.url || null),
         latencyMs: status.gateway.connectLatencyMs ?? null,
-        version: status.gateway.self && status.gateway.self.version ? status.gateway.self.version : null,
+        version: pickVersion(status.gateway) || (status.version != null && String(status.version).trim() !== '' ? String(status.version).trim() : null),
         host: REDACT_PATHS ? null : (status.gateway.self && status.gateway.self.host ? status.gateway.self.host : null),
         ip: REDACT_PATHS ? null : (status.gateway.self && status.gateway.self.ip ? status.gateway.self.ip : null),
         error: status.gateway.error || null,
@@ -1365,6 +1489,10 @@ async function updateStatus() {
   let modelHealth = [];
   if (gateway.reachable) {
     const [healthJson, modelsJson] = await Promise.all([getHealthJson(), getModelsStatusJson()]);
+    if (!gateway.version && healthJson && typeof healthJson === 'object') {
+      const hv = healthJson.version || (healthJson.gateway && healthJson.gateway.version) || (healthJson.self && healthJson.self.version);
+      if (hv != null && String(hv).trim() !== '') gateway = { ...gateway, version: String(hv).trim() };
+    }
     channelHealth = normalizeChannelHealthFromHealth(healthJson);
     if (channelHealth.length === 0 && Array.isArray(status.channelSummary) && status.channelSummary.length > 0) {
       channelHealth = status.channelSummary.map((ch) => {
@@ -1385,6 +1513,10 @@ async function updateStatus() {
       const modelIds = getModelIdsFromOpenClawConfig();
       modelHealth = modelIds.map((id) => ({ modelId: id, available: true, error: null }));
     }
+  }
+  if (!gateway.version) {
+    const cliVer = await getOpenClawVersionFromCli();
+    if (cliVer) gateway = { ...gateway, version: cliVer };
   }
 
   const gatewayService = status.gatewayService
@@ -1435,6 +1567,8 @@ async function updateStatus() {
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
     tokenCumulative: { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal },
     tokenByModel,
+    tokenByVendor,
+    tokenByVendorModel,
     modelsSummary: getModelsSummaryFromConfig(),
     pluginsSummary: getPluginsSummaryFromConfig(),
   };
@@ -1503,6 +1637,8 @@ const initial = {
   channelHealth: [],
   modelHealth: [],
   tokenByModel: [],
+  tokenByVendor: [],
+  tokenByVendorModel: [],
   sessionsTotal: null,
   recentSessions: [],
   system: null,

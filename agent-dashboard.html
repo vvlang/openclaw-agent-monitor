@@ -174,7 +174,18 @@
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
-                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按模型）</h2>
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按供应商·模型，数据库）</h2>
+                <p class="text-[10px] text-slate-500 mb-2">本地 SQLite 按次写入的准确统计；供应商为 model_id 首段（如 nvidia、anthropic）。</p>
+                <div id="token-by-vendor" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 mb-2">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+                <div id="token-by-vendor-model" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按模型，JSON 累计）</h2>
                 <p class="text-[10px] text-slate-500 mb-2">累计按会话归属到当时使用的模型；预估成本按「成本设置」单价（输入/输出未区分，均价估算）。</p>
                 <div id="token-by-model" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
                     <div class="text-slate-600 italic">等待数据...</div>
@@ -271,6 +282,24 @@
         const costConfigLog = document.getElementById('cost-config-log');
 
         let previousState = {};
+        /** 缓存已渲染的 Agent 卡片的 DOM 节点，按 agent.id 索引 */
+        let agentCardCache = {};
+
+        /** 计算 Agent 数据的指纹：所有影响展示的字段拼接成的字符串，指纹相同则不重绘 */
+        function agentFingerprint(agent) {
+            return [
+                agent.status,
+                agent.message,
+                agent.totalTokens,
+                agent.percentUsed,
+                agent.lastActive,
+                agent.sessionCount,
+                agent.cumulativeTokens,
+                agent.color,
+                (agent.model || '').trim(),
+                JSON.stringify((agent.boundChannels || []).slice().sort()),
+            ].join('|');
+        }
 
         function pctClass(pct) {
             if (pct == null) return 'sys-ok';
@@ -362,7 +391,7 @@
                 gatewayBadge.textContent = 'Gateway 在线';
                 gatewayBadge.className = 'text-xs font-mono px-2 py-1 rounded gateway-ok bg-green-900/30';
                 gatewayDetail.textContent = [
-                    gw.version && 'v' + gw.version,
+                    gw.version ? ('v' + gw.version) : '—',
                     gw.latencyMs != null && gw.latencyMs + 'ms',
                     gw.host && gw.host
                 ].filter(Boolean).join(' · ');
@@ -430,6 +459,39 @@
             if (usd == null || isNaN(usd)) return '—';
             if (usd < 0.01 && usd > 0) return '$0.00';
             return '$' + usd.toFixed(2);
+        }
+        function renderTokenByVendorAndModel(data) {
+            var vendorEl = document.getElementById('token-by-vendor');
+            var vmEl = document.getElementById('token-by-vendor-model');
+            if (!vendorEl && !vmEl) return;
+            var byVendor = data.tokenByVendor;
+            var byVendorModel = data.tokenByVendorModel;
+            if (vendorEl) {
+                if (!byVendor || !byVendor.length) {
+                    vendorEl.innerHTML = '<div class="text-slate-600 italic">暂无按供应商汇总（数据库）</div>';
+                } else {
+                    var vendorRows = byVendor.map(function (r) {
+                        return '<tr class="border-b border-slate-700/50">' +
+                            '<td class="py-0.5 pr-2">' + escapeHtml(r.vendor) + '</td>' +
+                            '<td class="py-0.5 text-right text-amber-400/90">' + formatTokenNum(r.total) + '</td></tr>';
+                    }).join('');
+                    vendorEl.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">供应商</th><th class="py-0.5 text-right">累计 Token</th></tr></thead><tbody>' + vendorRows + '</tbody></table>';
+                }
+            }
+            if (vmEl) {
+                if (!byVendorModel || !byVendorModel.length) {
+                    vmEl.innerHTML = '<div class="text-slate-600 italic">暂无按供应商·模型明细（数据库）</div>';
+                } else {
+                    var vmRows = byVendorModel.map(function (r) {
+                        var label = modelDisplayName(r.modelId);
+                        return '<tr class="border-b border-slate-700/50">' +
+                            '<td class="py-0.5 pr-2">' + escapeHtml(r.vendor) + '</td>' +
+                            '<td class="py-0.5 pr-2" title="' + escapeHtml(r.modelId) + '">' + escapeHtml(label) + '</td>' +
+                            '<td class="py-0.5 text-right text-amber-400/90">' + formatTokenNum(r.total) + '</td></tr>';
+                    }).join('');
+                    vmEl.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">供应商</th><th class="py-0.5 pr-2">模型</th><th class="py-0.5 text-right">累计 Token</th></tr></thead><tbody>' + vmRows + '</tbody></table>';
+                }
+            }
         }
         function renderTokenByModel(data) {
             var el = document.getElementById('token-by-model');
@@ -770,10 +832,18 @@
                     groupDiv.innerHTML = '<h3 class="agent-group-title">' + escapeHtml(groupTitle) + '</h3><div class="agent-group-cards"></div>';
                     var cardsContainer = groupDiv.querySelector('.agent-group-cards');
                     groupAgents.forEach(function (agent) {
+                    var fp = agentFingerprint(agent);
+                    var cachedCard = agentCardCache[agent.id];
                     var statusClass = getStatusClass(agent.status);
                     var isThinking = agent.status === 'thinking';
-                    var card = document.createElement('div');
-                    card.className = 'agent-card rounded-xl p-2.5 flex flex-col relative' + (isThinking ? ' thinking' : '');
+                    var card;
+                    if (cachedCard && cachedCard._fp === fp) {
+                        // 数据未变，复用已有 DOM 节点，不重绘
+                        card = cachedCard;
+                    } else {
+                        // 数据变化或首次渲染，创建新卡片
+                        card = document.createElement('div');
+                        card.className = 'agent-card rounded-xl p-2.5 flex flex-col relative' + (isThinking ? ' thinking' : '');
                     var modelName = (agent.model && agent.model.trim()) ? (agent.model.indexOf('/') >= 0 ? agent.model.split('/').pop() : agent.model) : '';
                     var modelDisplay = modelName ? escapeHtml(modelName) : '';
                     var modelPart = modelDisplay;
@@ -823,11 +893,22 @@
                         (agent.message ? '<div class="text-[9px] text-slate-500 truncate w-full text-center" title="' + escapeHtml(agent.message) + '">' + escapeHtml(agent.message) + '</div>' : '') +
                         '<button type="button" class="memory-btn tap-target text-[9px] px-1.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 mt-0.5" data-agent-id="' + escapeHtml(agent.id) + '" data-agent-name="' + escapeHtml(agent.name || agent.id) + '">记忆</button>' +
                         '</div>';
+                        // 记录指纹并缓存
+                        card._fp = fp;
+                        agentCardCache[agent.id] = card;
+                    }
                     cardsContainer.appendChild(card);
                     });
                     agentsContainer.appendChild(groupDiv);
                 });
             }
+
+            // 清理已消失的 Agent 卡片缓存
+            var currentIds = {};
+            (data.agents || []).forEach(function(a){ currentIds[a.id] = true; });
+            Object.keys(agentCardCache).forEach(function(id){
+                if (!currentIds[id]) delete agentCardCache[id];
+            });
 
             rawJsonEl.textContent = JSON.stringify(data, null, 2);
             lastUpdateEl.textContent = data.lastUpdated ? '更新：' + new Date(data.lastUpdated).toLocaleTimeString() : '--';
@@ -836,6 +917,7 @@
 
             renderGateway(data);
             renderTokenStats(data);
+            renderTokenByVendorAndModel(data);
             renderTokenByModel(data);
             renderModelsSummary(data);
             renderPluginsSummary(data);

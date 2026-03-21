@@ -1,1 +1,34 @@
-# 敏感信息 (必须忽略) .env .openclaw/ .clawhub/ plugins/ # 系统文件 .DS_Store # 依赖 node_modules/ # 日志 *.log # 临时文件 *.tmp agent-status.json.backup # 构建产物 dist/ build/
+# 敏感信息 (必须忽略)
+.env
+.openclaw/
+.clawhub/
+plugins/
+
+# 系统文件
+.DS_Store
+
+# 依赖
+node_modules/
+
+# 日志
+*.log
+
+# 临时文件
+*.tmp
+agent-status.json.backup
+
+# 构建产物
+dist/
+build/
+
+# 本地 token 统计数据库
+token-usage.db
+token-usage.db-wal
+token-usage.db-shm
+
+# 运行时生成的状态文件（不提交）
+agent-status.json
+token-cumulative-state.json
+model-pricing.json
+agent-status-writer.js.bak
+openclaw-config-copy.json
