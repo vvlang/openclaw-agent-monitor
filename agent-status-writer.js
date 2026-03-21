@@ -876,7 +876,7 @@ const DEFAULT_COST_CONFIG = {
 };
 const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '3000', 10) || 3000;
 /** openclaw CLI 命令超时（毫秒）。慢环境或 Agent 多时可设 OPENCLAW_MONITOR_TIMEOUT_MS=60000 等 */
-const COMMAND_TIMEOUT_MS = Math.max(5000, parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '30000', 10) || 30000);
+const COMMAND_TIMEOUT_MS = Math.max(5000, parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '8000', 10) || 8000);
 const ACTIVE_AGE_MS = 120000; // 2 分钟内有活动视为 thinking
 const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
@@ -1089,7 +1089,7 @@ function getSystemInfo() {
  */
 function getStatusJson() {
   return new Promise((resolve) => {
-    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 15000);
+    const timeoutMs = COMMAND_TIMEOUT_MS;
     let raw = '';
     let resolved = false;
     const child = spawn('openclaw', ['status', '--json'], {
@@ -1285,25 +1285,26 @@ function getMemoryForScopeAsync(scope) {
 async function updateStatus() {
   const status = await getStatusJson();
   if (!status) {
-    // 【修复 #2】命令失败时，标记错误但不覆盖旧数据
-    console.error('[writer] openclaw status 执行失败，标记错误状态');
-    try {
-      const prev = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
-      prev.lastUpdated = new Date().toISOString();
-      prev.gateway = prev.gateway || {};
-      prev.gateway.reachable = false;
-      prev.gateway.error = 'openclaw status 执行失败';
-      prev.system = getSystemInfo();
-      prev.error = { message: 'Gateway status fetch failed', time: new Date().toISOString() };
-      // 原子写入（禁止写入 ~/.openclaw）
-      const tempFile = OUTPUT_FILE + '.tmp';
-      ensureNotOpenClawConfigPath(tempFile);
-      ensureNotOpenClawConfigPath(OUTPUT_FILE);
-      fs.writeFileSync(tempFile, JSON.stringify(prev, null, 2));
-      fs.renameSync(tempFile, OUTPUT_FILE);
-    } catch (e) {
-      console.warn('[writer] updateStatus read/write prev on status fail:', e.message || e);
-    }
+    // 命令失败时，从数据库读取各 Agent 的真实累计 Token（不依赖 openclaw status）
+    let prev = null;
+    try { prev = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8')); } catch (_) {}
+    const dbByAgent = {};
+    let dbGlobal = 0;
+    try { tokenDb.init(); tokenDb.getStatsByAgent().forEach(({ agentId, total }) => { dbByAgent[agentId] = total; dbGlobal += total; }); } catch (_) {}
+    const out = {
+      lastUpdated: new Date().toISOString(),
+      agents: prev ? prev.agents : [],
+      gateway: { reachable: false, error: 'openclaw status 执行失败' },
+      system: prev ? prev.system : getSystemInfo(),
+      tokenCumulative: { byAgent: dbByAgent, global: dbGlobal },
+      tokenByVendor: prev ? prev.tokenByVendor : [],
+      tokenByVendorModel: prev ? prev.tokenByVendorModel : [],
+    };
+    const tempFile = OUTPUT_FILE + '.tmp';
+    ensureNotOpenClawConfigPath(tempFile);
+    ensureNotOpenClawConfigPath(OUTPUT_FILE);
+    fs.writeFileSync(tempFile, JSON.stringify(out, null, 2));
+    fs.renameSync(tempFile, OUTPUT_FILE);
     return;
   }
 
@@ -1361,7 +1362,8 @@ async function updateStatus() {
     });
   }
 
-  // Token 累计：根据当前各 Agent 最近会话的 sessionId/totalTokens 做增量累加并持久化；同时按模型（modelId）累计
+  // Token 累计：SQLite 数据库（token-db）为权威数据源；按 Agent 和模型分别累计
+  // （当 openclaw status 可用时，增量记录到数据库；当 status 超时时，直接从数据库读总数）
   let tokenState = { byAgent: {}, byModel: {} };
   try {
     const raw = fs.readFileSync(TOKEN_CUMULATIVE_STATE_FILE, 'utf-8');
@@ -1371,6 +1373,7 @@ async function updateStatus() {
   } catch (_) {}
   const cumulativeByAgent = {};
   let tokenCumulativeGlobal = 0;
+  const statusAvailable = !!status;
   agents.forEach((a) => {
     const sessionId = a.lastSessionId || null;
     const totalTokens = a.totalTokens != null ? Number(a.totalTokens) : 0;
@@ -1378,18 +1381,13 @@ async function updateStatus() {
     let rec = tokenState.byAgent[a.id];
     if (!rec) rec = { cumulativeTokens: 0, lastSessionId: null, lastTotalTokens: 0, lastModelId: null };
     if (rec.lastModelId == null) rec.lastModelId = null;
-    if (sessionId != null && totalTokens >= 0) {
+    if (statusAvailable && sessionId != null && totalTokens >= 0) {
       if (rec.lastSessionId === sessionId) {
         const delta = totalTokens - rec.lastTotalTokens;
         if (delta > 0) {
           rec.cumulativeTokens += delta;
           tokenState.byModel[modelId] = (tokenState.byModel[modelId] || 0) + delta;
-          try {
-            tokenDb.init();
-            tokenDb.insertUsage({ modelId, tokens: delta, agentId: a.id, sessionId });
-          } catch (e) {
-            if (process.env.DEBUG) console.warn('[writer] token-db insertUsage:', e.message || e);
-          }
+          try { tokenDb.init(); tokenDb.insertUsage({ modelId, tokens: delta, agentId: a.id, sessionId }); } catch (_) {}
         }
         rec.lastTotalTokens = totalTokens;
       } else {
@@ -1397,12 +1395,7 @@ async function updateStatus() {
           rec.cumulativeTokens += rec.lastTotalTokens;
           const lastModel = rec.lastModelId || 'unknown';
           tokenState.byModel[lastModel] = (tokenState.byModel[lastModel] || 0) + rec.lastTotalTokens;
-          try {
-            tokenDb.init();
-            tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, agentId: a.id, sessionId: rec.lastSessionId });
-          } catch (e) {
-            if (process.env.DEBUG) console.warn('[writer] token-db insertUsage (flush):', e.message || e);
-          }
+          try { tokenDb.init(); tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, agentId: a.id, sessionId: rec.lastSessionId }); } catch (_) {}
         }
         rec.lastSessionId = sessionId;
         rec.lastTotalTokens = totalTokens;
@@ -1413,6 +1406,17 @@ async function updateStatus() {
     cumulativeByAgent[a.id] = rec.cumulativeTokens;
     tokenCumulativeGlobal += rec.cumulativeTokens;
   });
+  // 当 status 不可用时，直接从 SQLite 数据库读取各 Agent 的真实累计（绕过 openclaw status 超时问题）
+  if (!statusAvailable) {
+    try {
+      tokenDb.init();
+      const dbByAgent = tokenDb.getStatsByAgent();
+      dbByAgent.forEach(({ agentId, total }) => {
+        cumulativeByAgent[agentId] = total;
+        tokenCumulativeGlobal += total;
+      });
+    } catch (_) {}
+  }
   try {
     ensureNotOpenClawConfigPath(TOKEN_CUMULATIVE_STATE_FILE);
     fs.writeFileSync(TOKEN_CUMULATIVE_STATE_FILE, JSON.stringify(tokenState, null, 2), 'utf-8');
@@ -1565,7 +1569,13 @@ async function updateStatus() {
     recentSessions,
     system,
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
-    tokenCumulative: { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal },
+    tokenCumulative: (() => {
+      // SQLite 是各 Agent Token 累计的权威数据源（包含历史导入 + 增量记录）
+      const dbByAgent = {};
+      let dbGlobal = 0;
+      try { tokenDb.init(); tokenDb.getStatsByAgent().forEach(({ agentId, total }) => { dbByAgent[agentId] = total; dbGlobal += total; }); } catch (_) {}
+      return { byAgent: dbByAgent, global: dbGlobal };
+    })(),
     tokenByModel,
     tokenByVendor,
     tokenByVendorModel,
