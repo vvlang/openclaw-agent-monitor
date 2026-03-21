@@ -115,10 +115,7 @@ function probeGatewayApiHealth(baseUrl, token) {
  */
 function normalizeProbeUrl(gatewayUrl) {
   if (!gatewayUrl || typeof gatewayUrl !== 'string') return null;
-  let s = gatewayUrl.trim();
-  // 去掉尾部斜杠，统一处理后再加回来
-  const hasSlash = s.endsWith('/');
-  s = s.replace(/\/$/, '');
+  let s = gatewayUrl.trim().replace(/\/$/, '');
   if (s.startsWith('ws://')) s = 'http://' + s.slice(5);
   else if (s.startsWith('wss://')) s = 'https://' + s.slice(6);
   // 如果 URL 没有路径（只有 host:port），加上 '/' 让 url.parse 正确解析 port
@@ -1120,7 +1117,7 @@ function getStatusJson() {
       timeout: timeoutMs,
       maxBuffer: 5 * 1024 * 1024,
       env: process.env,
-    }, (err, stdout, stderr) => {
+    }, (err, stdout) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
@@ -1129,16 +1126,21 @@ function getStatusJson() {
         resolve(null);
         return;
       }
+      const raw = stdout || '';
+      // execFile gives complete stdout — try direct parse first, fall back to search
       try {
-        const raw = stdout || '';
-        const start = raw.indexOf('{');
-        if (start === -1) { resolve(null); return; }
-        let depth = 0, end = -1;
-        for (let i = start; i < raw.length; i++) {
-          if (raw[i] === '{') depth++;
-          else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-        }
-        if (end === -1) { resolve(null); return; }
+        resolve(JSON.parse(raw));
+        return;
+      } catch (_) {}
+      const start = raw.indexOf('{');
+      if (start === -1) { resolve(null); return; }
+      let depth = 0, end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end === -1) { resolve(null); return; }
+      try {
         resolve(JSON.parse(raw.slice(start, end + 1)));
       } catch (_) {
         resolve(null);
@@ -1262,23 +1264,24 @@ function getMemoryForScopeAsync(scope) {
   }
 }
 
+async function probeGatewayReachability() {
+  let base = GATEWAY_FALLBACK_URL;
+  try {
+    const raw = fs.readFileSync(OPENCLAW_CONFIG_FILE, 'utf-8');
+    const cfg = JSON.parse(raw);
+    if (cfg && cfg.gateway && cfg.gateway.url) base = cfg.gateway.url;
+  } catch (_) {}
+  const ok = await probeGatewayUrl(base + '/health');
+  if (ok) return { reachable: true, url: base, error: null };
+  const ok2 = await probeGatewayUrl(base);
+  if (ok2) return { reachable: true, url: base, error: null };
+  return { reachable: false, url: base, error: 'gateway /health 探测失败' };
+}
+
 async function updateStatus() {
-  // 并行：同时探测 gateway 在线状态 + 拉取 status（gateway 探测更快，两者独立）
   const [status, gwReachability] = await Promise.all([
     getStatusJson(),
-    (async () => {
-      let base = GATEWAY_FALLBACK_URL;
-      try {
-        const raw = fs.readFileSync(OPENCLAW_CONFIG_FILE, 'utf-8');
-        const cfg = JSON.parse(raw);
-        if (cfg && cfg.gateway && cfg.gateway.url) base = cfg.gateway.url;
-      } catch (_) {}
-      const ok = await probeGatewayUrl(base + '/health');
-      if (ok) return { reachable: true, url: base, error: null };
-      const ok2 = await probeGatewayUrl(base);
-      if (ok2) return { reachable: true, url: base, error: null };
-      return { reachable: false, url: base, error: 'gateway /health 探测失败' };
-    })(),
+    probeGatewayReachability(),
   ]);
 
   if (!status) {
