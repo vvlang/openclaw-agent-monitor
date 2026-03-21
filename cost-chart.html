@@ -50,7 +50,7 @@ body{background:#0f1117;color:#e2e8f0;font-family:'Courier New',monospace;min-he
 
 <script>
 // ─── Config ───────────────────────────────────────────────────────────────────
-const API = 'http://127.0.0.1:3880/cost-history';
+const API = window.location.origin + '/cost-history';
 let days = 30;
 let rawData = [];
 let maxTokens = 0;

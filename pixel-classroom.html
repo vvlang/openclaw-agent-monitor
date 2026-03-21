@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>🏫 三年二班 · OpenClaw Agent 教室</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;display:flex;flex-direction:column;align-items:center;min-height:100vh;font-family:'Courier New',monospace;color:#fff;overflow-x:hidden;overflow-y:auto;user-select:none;-webkit-overflow-scrolling:touch}
+#header{font-size:1.1em;color:#ffd700;text-shadow:1px 1px 4px #000;margin:6px 0 4px;letter-spacing:3px;display:flex;align-items:center;gap:12px}
+#header span{font-size:0.75em;color:#aaa;text-shadow:none;letter-spacing:0}
+#canvas{border:4px solid #5c3d2e;image-rendering:pixelated;image-rendering:crisp-edges;display:block;flex-shrink:0;max-width:100%;height:auto}
+#legend{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;justify-content:center;max-width:900px}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:8px;font-size:10px;color:#fff;text-shadow:1px 1px 2px #000;border:1px solid rgba(255,255,255,0.2)}
+.chip-dot{width:7px;height:7px;border-radius:50%;border:1px solid rgba(0,0,0,0.3);flex-shrink:0}
+.transfer-chip{background:linear-gradient(135deg,#e67e22,#d35400);color:#fff;font-weight:bold;border-color:#f39c12}
+#info{margin-top:3px;font-size:9px;color:#555}
+</style>
+</head>
+<body>
+<div id="header">🏫 三年二班豪华版<span>· OpenClaw</span></div>
+<div id="debug" style="font-size:9px;color:#888;margin:2px 0;text-align:center"></div>
+<canvas id="canvas"></canvas>
+<div id="legend"></div>
+<div id="info">每 8s 刷新 · 每 5s 随机聊天</div>
+
+<script>
+// ─── Canvas Setup ─────────────────────────────────────────────────────────────
+var canvas=document.getElementById('canvas');
+var ctx=canvas.getContext('2d');
+var COLS=28,ROWS=18;
+var TILE=24;
+var IS_MOBILE=window.innerWidth<520;
+
+function resize(){
+  IS_MOBILE=window.innerWidth<520;
+  var maxW=Math.min(window.innerWidth-16,IS_MOBILE?400:900);
+  var maxH=window.innerHeight-(IS_MOBILE?100:140);
+  TILE=Math.max(IS_MOBILE?18:14,Math.min(Math.floor(maxW/COLS),Math.floor(maxH/ROWS),IS_MOBILE?22:28));
+  canvas.width=COLS*TILE;canvas.height=ROWS*TILE;
+}
+window.addEventListener('resize',resize);
+resize();
+
+// ─── Tile Types ───────────────────────────────────────────────────────────────
+var T={WALL:0,FL_A:1,FL_B:2,BB:3,WIN:4,DESK:5,TDSK:6,BOOK:7,PLANT:8,CLOCK:9,AISLE:10,DOOR:11,LIGHT:12,TRASH:13,CHAIR:14};
+var MAP=[];
+var DESK_POS=[];
+var AISLE_WALK=[];
+
+function buildMap(){
+  var r,c;
+  for(r=0;r<ROWS;r++){MAP[r]=new Array(COLS).fill(T.FL_A);}
+  // 外墙
+  for(c=0;c<COLS;c++){MAP[0][c]=T.WALL;MAP[ROWS-1][c]=T.WALL;}
+  for(r=0;r<ROWS;r++){MAP[r][0]=T.WALL;MAP[r][COLS-1]=T.WALL;}
+  // 棋盘格地面
+  for(r=1;r<ROWS-1;r++){for(c=1;c<COLS-1;c++){MAP[r][c]=(r+c)%2===0?T.FL_A:T.FL_B;}}
+  // 黑板（2行×12列）
+  for(r=1;r<=2;r++){for(c=8;c<=19;c++){MAP[r][c]=T.BB;}}
+  // 窗户（左墙 row2-5，右墙 row2-5）
+  for(r=2;r<=5;r++){MAP[r][0]=T.WIN;MAP[r][COLS-1]=T.WIN;}
+  // 讲台
+  for(r=3;r<=4;r++){for(c=10;c<=15;c++){MAP[r][c]=T.TDSK;}}
+  // 门
+  for(r=13;r<=15;r++){MAP[r][COLS-1]=T.DOOR;}
+  for(r=9;r<=12;r++){MAP[r][COLS-1]=T.DOOR;}
+  // 书架（左后方）
+  for(r=14;r<=16;r++){for(c=1;c<=2;c++){MAP[r][c]=T.BOOK;}}
+  // 花盆（右后方）
+  MAP[15][COLS-3]=T.PLANT;MAP[15][COLS-4]=T.PLANT;
+  // 时钟
+  MAP[1][13]=T.CLOCK;MAP[1][14]=T.CLOCK;
+  // 日光灯
+  MAP[0][7]=T.LIGHT;MAP[0][8]=T.LIGHT;MAP[0][19]=T.LIGHT;MAP[0][20]=T.LIGHT;
+  // 垃圾桶
+  MAP[14][COLS-2]=T.TRASH;
+  // 过道（中间两行）
+  for(c=1;c<COLS-1;c++){MAP[7][c]=T.AISLE;MAP[8][c]=T.AISLE;}
+  // 课桌：3排×5列
+  DESK_POS.length=0;
+  var deskRows=[4,10,13];
+  var deskCols=[3,7,11,15,19];
+  deskRows.forEach(function(dr){
+    deskCols.forEach(function(dc){
+      for(var rr=dr;rr<=dr+1;rr++){
+        MAP[rr][dc]=T.DESK;
+        MAP[rr][dc+1]=T.DESK;
+      }
+      DESK_POS.push([dr+2,dc]);
+    });
+  });
+  // 过道可步行格
+  AISLE_WALK.length=0;
+  for(r=5;r<=16;r++){
+    for(c=1;c<COLS-1;c++){
+      if(MAP[r][c]===T.AISLE||MAP[r][c]===T.FL_A||MAP[r][c]===T.FL_B||MAP[r][c]===T.DOOR){
+        AISLE_WALK.push({r:r,c:c});
+      }
+    }
+  }
+}
+buildMap();
+
+// ─── Color Utils ──────────────────────────────────────────────────────────────
+function hexRgb(h){
+  if(!h||h[0]!=='#')return{r:150,g:150,b:200};
+  var n=parseInt(h.slice(1),16);
+  return{r:(n>>16)&255,g:(n>>8)&255,b:n&255};
+}
+function rgba(h,a){var c=hexRgb(h);return'rgba('+c.r+','+c.g+','+c.b+','+a+')';}
+var HEX_PALETTE=['#8b5cf6','#3b82f6','#10b981','#f59e0b','#f43f5e','#06b6d4','#f97316','#d946ef','#84cc16','#0ea5e9'];
+var COLOR_MAP={violet:'#8b5cf6',blue:'#3b82f6',emerald:'#10b981',amber:'#f59e0b',rose:'#f43f5e',cyan:'#06b6d4',orange:'#f97316',fuchsia:'#d946ef',lime:'#84cc16',sky:'#0ea5e9',slate:'#64748b'};
+function agentColor(a,i){
+  if(!a||!a.color)return HEX_PALETTE[i%HEX_PALETTE.length];
+  var c=String(a.color).replace('bg-','').replace('-500','');
+  return COLOR_MAP[c]||HEX_PALETTE[i%HEX_PALETTE.length];
+}
+
+// ─── Draw Tile ───────────────────────────────────────────────────────────────
+function drawTile(x,y,type){
+  var s=TILE;
+  switch(type){
+    case T.WALL:
+      ctx.fillStyle='#7c5c3e';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#6b4f35';ctx.fillRect(x,y,s,2);
+      ctx.fillStyle='#8d6e4a';ctx.fillRect(x,y+s-2,s,2);
+      break;
+    case T.FL_A:
+      ctx.fillStyle='#d4c4a8';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#c8b898';ctx.fillRect(x,y,1,s);
+      ctx.fillStyle='#c8b898';ctx.fillRect(x,y,s,1);
+      break;
+    case T.FL_B:
+      ctx.fillStyle='#c2b28a';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#b8a67c';ctx.fillRect(x,y,1,s);
+      ctx.fillStyle='#b8a67c';ctx.fillRect(x,y,s,1);
+      break;
+    case T.BB:
+      ctx.fillStyle='#1a4a2e';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#226b3a';ctx.fillRect(x+1,y+1,s-2,s-2);
+      ctx.fillStyle='rgba(255,255,255,0.06)';ctx.fillRect(x+2,y+2,s-4,s-4);
+      break;
+    case T.WIN:
+      ctx.fillStyle='#6b4f35';ctx.fillRect(x,y,s,s);
+      var gy=y/s;
+      ctx.fillStyle='hsl(200,60%,'+(75-5*gy)+'%)';ctx.fillRect(x+2,y+2,s-4,s-4);
+      ctx.fillStyle='#5a4025';ctx.fillRect(x+Math.floor(s/2)-1,y+2,2,s-4);
+      ctx.fillRect(x+2,y+Math.floor(s/2)-1,s-4,2);
+      ctx.fillStyle='rgba(255,255,220,0.1)';ctx.fillRect(x+3,y+3,s-6,3);
+      break;
+    case T.DESK:
+      ctx.fillStyle='#b8874a';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#cc9e5c';ctx.fillRect(x+1,y+1,s-2,2);
+      ctx.fillStyle='#8b6540';ctx.fillRect(x+2,y+s-3,2,s-3);
+      ctx.fillRect(x+s-4,y+s-3,2,s-3);
+      break;
+    case T.TDSK:
+      ctx.fillStyle='#9a7238';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#b89050';ctx.fillRect(x+1,y+1,s-2,2);
+      ctx.fillStyle='#7a5a28';ctx.fillRect(x+2,y+s-3,2,s-3);
+      ctx.fillRect(x+s-4,y+s-3,2,s-3);
+      break;
+    case T.BOOK:
+      ctx.fillStyle='#5c3d1e';ctx.fillRect(x,y,s,s);
+      for(var bi=0;bi<4;bi++){
+        ctx.fillStyle='#8b5a2b';ctx.fillRect(x+1,y+2+bi*5,s-2,4);
+        var bc=['#c0392b','#2980b9','#27ae60','#8e44ad'];
+        ctx.fillStyle=bc[bi%4];ctx.fillRect(x+2,y+3+bi*5,3,2);
+      }
+      break;
+    case T.PLANT:
+      ctx.fillStyle='#a0522d';ctx.fillRect(x+3,y+s-6,s-6,6);
+      ctx.fillStyle='#8b4513';ctx.fillRect(x+4,y+s-7,s-8,2);
+      ctx.fillStyle='#27ae60';
+      ctx.fillRect(x+s/2-2,y+3,4,s-11);
+      ctx.fillRect(x+s/2-5,y+5,3,6);
+      ctx.fillRect(x+s/2+2,y+6,3,5);
+      ctx.fillStyle='#2ecc71';
+      ctx.fillRect(x+s/2-1,y+2,2,3);
+      break;
+    case T.CLOCK:
+      ctx.fillStyle='#5c3d2e';ctx.fillRect(x,y,s,s);
+      var cx2=x+s/2,cy=y+s/2,r=s/2-2;
+      ctx.beginPath();ctx.arc(cx2,cy,r,0,Math.PI*2);
+      ctx.fillStyle='#f5f5dc';ctx.fill();
+      ctx.strokeStyle='#333';ctx.lineWidth=1;ctx.stroke();
+      var now=new Date(),h=now.getHours()%12,m=now.getMinutes();
+      var hourA=(h*30+m*0.5-90)*Math.PI/180,minA=(m*6-90)*Math.PI/180;
+      ctx.strokeStyle='#333';ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(cx2,cy);ctx.lineTo(cx2+Math.cos(hourA)*(r-3),cy+Math.sin(hourA)*(r-3));ctx.stroke();
+      ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(cx2,cy);ctx.lineTo(cx2+Math.cos(minA)*(r-1),cy+Math.sin(minA)*(r-1));ctx.stroke();
+      break;
+    case T.AISLE:
+      ctx.fillStyle='#bfaf95';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#b5a38b';ctx.fillRect(x,y,1,s);
+      break;
+    case T.DOOR:
+      ctx.fillStyle='#7c5c3e';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#a07850';ctx.fillRect(x+2,y+2,s-4,s-4);
+      ctx.fillStyle='#d4a84b';ctx.fillRect(x+s-5,y+s/2-1,2,2);
+      ctx.fillStyle='#c8a060';ctx.fillRect(x+3,y+3,s-8,4);
+      break;
+    case T.LIGHT:
+      ctx.fillStyle='#555';ctx.fillRect(x,y,s,s);
+      ctx.fillStyle='#fffde0';ctx.fillRect(x+2,y+s/2-2,s-4,4);
+      ctx.fillStyle='rgba(255,253,200,0.12)';ctx.fillRect(x,y,1,s);
+      break;
+    case T.TRASH:
+      ctx.fillStyle='#888';ctx.fillRect(x+s/4,y+2,s/2,s-2);
+      ctx.fillStyle='#666';ctx.fillRect(x+s/4-1,y,2,s/2+2);
+      break;
+    case T.CHAIR:
+      ctx.fillStyle='#7a5a38';ctx.fillRect(x+s/3,y+s*0.8,s/3,s*0.2);
+      ctx.fillStyle='#9a7a58';ctx.fillRect(x+s/3-1,y+s*0.6,s/3+2,3);
+      break;
+    default:
+      ctx.fillStyle='#ccc';ctx.fillRect(x,y,s,s);
+  }
+}
+
+// ─── Pixel Character ───────────────────────────────────────────────────────────
+var animFrame=0;
+var lastChat=Date.now();
+var chatBubbles=[];
+
+function drawCharacterAt(px,py,agent,isTransfer,flashT){
+  var s=TILE;
+  var w=Math.round(s*0.7);
+  var h=Math.round(s*1.1);
+  var ox=Math.round((s-w)/2);
+  var oy=py+s-2-h;
+
+  if(flashT>0&&flashT%4<2){ctx.globalAlpha=0.5;}
+
+  var shirtColor=agent?agentColor(agent,agents.indexOf(agent)):'#888';
+  var isThinking=agent&&agent.status==='thinking';
+  var isError=agent&&agent.status==='error';
+
+  // 腿
+  ctx.fillStyle='#4a3728';
+  ctx.fillRect(ox+Math.round(w*0.25),oy+h-4,3,4);
+  ctx.fillRect(ox+Math.round(w*0.55),oy+h-4,3,4);
+
+  // 身体
+  var bodyTop=oy+Math.round(h*0.38);
+  var bodyH=Math.round(h*0.36);
+  ctx.fillStyle=isError?'#cc3333':shirtColor;
+  ctx.fillRect(ox,bodyTop,w,bodyH);
+
+  // 插班生马甲
+  if(isTransfer){
+    ctx.fillStyle='#e67e22';
+    ctx.fillRect(ox+1,bodyTop+2,w-2,bodyH-4);
+    ctx.fillStyle='#fff';
+    ctx.font='bold '+Math.floor(s*0.22)+'px monospace';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('插',ox+w/2,bodyTop+bodyH/2);
+  }
+
+  // 衣服高光
+  ctx.fillStyle='rgba(255,255,255,0.18)';
+  ctx.fillRect(ox,bodyTop,w,2);
+
+  // 手臂
+  var armBob=isThinking?Math.sin(animFrame*0.15)*2:0;
+  ctx.fillStyle='#888';
+  ctx.fillRect(ox-1,bodyTop+2,2,bodyH-4);
+  ctx.fillRect(ox+w-1,bodyTop+2+armBob,2,bodyH-4-armBob);
+
+  // 头
+  var headR=Math.round(w*0.42);
+  var hcx=ox+w/2,hcy=oy+headR+1;
+  ctx.beginPath();ctx.arc(hcx,hcy,headR,0,Math.PI*2);
+  ctx.fillStyle='#f5c5a0';ctx.fill();
+  ctx.strokeStyle='#e0a880';ctx.lineWidth=1;ctx.stroke();
+
+  // 头发
+  ctx.fillStyle='#3d2b1f';
+  ctx.beginPath();ctx.arc(hcx,hcy-headR*0.3,headR,Math.PI,0);ctx.fill();
+  ctx.fillRect(hcx-headR+1,hcy-headR*0.3-2,headR*2-2,3);
+  ctx.fillRect(hcx-headR+2,hcy-headR*0.3,4,3);
+  ctx.fillRect(hcx+headR-6,hcy-headR*0.3,4,3);
+
+  // 眼睛
+  var eyeY=hcy-1;
+  var eyeLX=hcx-3,eyeRX=hcx+1;
+  if(isThinking){
+    var dot=(animFrame%18)<6?0:(animFrame%18)<12?1:2;
+    ctx.fillStyle='#333';
+    for(var di=0;di<=dot;di++){ctx.fillRect(eyeLX+di*3,eyeY,2,2);ctx.fillRect(eyeRX+di*3,eyeY,2,2);}
+    var bx2=hcx-6,by2=hcy-headR-8;
+    ctx.fillStyle='rgba(255,255,255,0.9)';ctx.fillRect(bx2-2,by2-2,16,7);
+    ctx.fillStyle='#333';ctx.font=Math.floor(s*0.2)+'px monospace';
+    ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillText(['.  ','.. ','...'][dot],bx2,by2+1);
+  } else if(isError){
+    ctx.strokeStyle='#cc0000';ctx.lineWidth=1.5;
+    [[eyeLX,eyeY],[eyeRX,eyeY]].forEach(function(e){ctx.beginPath();ctx.moveTo(e[0]-2,e[1]-2);ctx.lineTo(e[0]+2,e[1]+2);ctx.stroke();ctx.beginPath();ctx.moveTo(e[0]+2,e[1]-2);ctx.lineTo(e[0]-2,e[1]+2);ctx.stroke();});
+  } else {
+    ctx.fillStyle='#333';ctx.fillRect(eyeLX,eyeY,2,2);ctx.fillRect(eyeRX,eyeY,2,2);
+  }
+
+  // 嘴巴
+  ctx.fillStyle='#c09080';
+  ctx.fillRect(hcx-1,hcy+2,2,1);
+
+  // 腮红
+  ctx.fillStyle='rgba(255,150,150,0.3)';
+  ctx.fillRect(hcx-headR+2,hcy+1,3,2);
+  ctx.fillRect(hcx+headR-5,hcy+1,3,2);
+
+  // 状态灯
+  var dotX=ox+w/2,dotY=oy-4;
+  ctx.beginPath();ctx.arc(dotX,dotY,2.5,0,Math.PI*2);
+  ctx.fillStyle=isThinking?'#2ecc71':isError?'#e74c3c':'#f1c40f';
+  ctx.fill();ctx.strokeStyle='rgba(0,0,0,0.4)';ctx.lineWidth=0.5;ctx.stroke();
+
+  // 昵称
+  if(agent&&agent.name){
+    ctx.font='bold '+Math.floor(s*0.28)+'px monospace';
+    var lw=ctx.measureText(agent.name).width;
+    ctx.fillStyle='rgba(0,0,0,0.75)';
+    ctx.fillRect(dotX-lw/2-2,oy-h+2,lw+4,8);
+    ctx.fillStyle='#fff';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(agent.name,dotX,oy-h+6);
+  }
+
+  ctx.globalAlpha=1;
+}
+
+// ─── Chat Bubble ──────────────────────────────────────────────────────────────
+var DIALOGUES=[
+  '老师在看着呢！','这道题怎么做呀？','我懂了！','等等我，还没想完...','答案是42！',
+  '肚子饿了...','认真听课！','老师好温柔~','下课要喝水！','好困啊...','做完了！',
+  '让我看看你的作业','不许抄！','举手回答！','老师我有问题！','下课铃怎么还不响...',
+  '笔记记哪里？','好难啊...','我记住了！','能再说一遍吗？','懂了懂了！',
+  '好无聊...','同学借我橡皮！','快下课吧！','老师辛苦了！','我第一个写完！',
+  '等等我！','认真听课！','不许说话！','这道题选C！','我知道了！',
+  '好厉害！','记住了！','让我想想...','好累啊...','借我尺子！',
+  '下课一起回家吗','今天作业多不多','考试多少分','书包好重...',
+];
+
+function spawnChat(){
+  var allChars=[];
+  agents.forEach(function(a,i){
+    var pos=DESK_POS[i];
+    if(pos)allChars.push({type:'agent',a:a,r:pos[0],c:pos[1]});
+  });
+  transferWorkers.forEach(function(tw){allChars.push({type:'transfer',r:tw.r,c:tw.c});});
+  if(allChars.length===0)return;
+  var pick=allChars[Math.floor(Math.random()*allChars.length)];
+  var text=DIALOGUES[Math.floor(Math.random()*DIALOGUES.length)];
+  chatBubbles.push({r:pick.r,c:pick.c,text:text,age:0,maxAge:150});
+}
+
+function drawChatBubbles(){
+  ctx.font='bold '+Math.max(8,Math.floor(TILE*0.32))+'px monospace';
+  chatBubbles.forEach(function(b){
+    var px=b.c*TILE,py=b.r*TILE-TILE*0.6;
+    ctx.font='bold '+Math.max(8,Math.floor(TILE*0.32))+'px monospace';
+    var tw=ctx.measureText(b.text).width+8;
+    var bw=Math.min(tw,TILE*4);
+    ctx.fillStyle='rgba(255,255,255,0.95)';
+    if(ctx.beginPath)ctx.beginPath();ctx.rect(px-TILE/2,py,bw,10);ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.2)';ctx.lineWidth=0.5;ctx.stroke();
+    ctx.fillStyle='#333';ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillText(b.text.substring(0,8),px-TILE/2+4,py+5);
+  });
+}
+
+// ─── Transfer Workers AI ───────────────────────────────────────────────────────
+var transferWorkers=[];
+
+function findPath(start,end){
+  if(start.r===end.r&&start.c===end.c)return[];
+  var visited=new Set(),parent=new Map();
+  var queue=[start],key=function(r,c){return r+','+c;};
+  visited.add(key(start.r,start.c));
+  var dirs=[[0,1],[0,-1],[1,0],[-1,0]];
+  while(queue.length){
+    var cur=queue.shift();
+    if(cur.r===end.r&&cur.c===end.c){
+      var path=[],k=key(cur.r,cur.c);
+      while(k){
+        var parts=k.split(',');
+        path.unshift({r:parseInt(parts[0]),c:parseInt(parts[1])});
+        k=parent.get(k);
+      }
+      return path.slice(1);
+    }
+    dirs.forEach(function(d){
+      var nr=cur.r+d[0],nc=cur.c+d[1],nk=key(nr,nc);
+      if(!visited.has(nk)&&nr>=0&&nr<ROWS&&nc>=0&&nc<COLS&&(MAP[nr][nc]===T.AISLE||MAP[nr][nc]===T.FL_A||MAP[nr][nc]===T.FL_B||MAP[nr][nc]===T.DOOR)){
+        visited.add(nk);parent.set(nk,key(cur.r,cur.c));queue.push({r:nr,c:nc});
+      }
+    });
+  }
+  return[];
+}
+
+function updateTransferWorkers(){
+  var now=Date.now();
+  transferWorkers.forEach(function(tw){
+    if(!tw.target||tw.path.length===0){
+      var w=AISLE_WALK[Math.floor(Math.random()*AISLE_WALK.length)];
+      tw.target=w;tw.path=findPath({r:tw.r,c:tw.c},{r:w.r,c:w.c});tw.lastMove=now;
+    }
+    if(tw.path.length>0&&now-tw.lastMove>600){
+      var step=tw.path.shift();if(step){tw.r=step.r;tw.c=step.c;}tw.lastMove=now;
+    }
+    tw.animFrame++;
+  });
+}
+
+// ─── Agent State ───────────────────────────────────────────────────────────────
+var agents=[];
+var prevStatus={};
+var flashes={};
+var lastLoad=0;
+
+// ─── Load Data ────────────────────────────────────────────────────────────────
+async function loadData(){
+  try{
+    var resp=await fetch('agent-status.json?t='+Date.now());
+    if(!resp.ok)return;
+    var data=await resp.json();
+
+    // 旧状态
+    agents.forEach(function(a){prevStatus[a.id]=a.status;});
+
+    // 解析持久 Agent
+    agents=(data.agents||[]).map(function(a,i){
+      return{
+        id:a.id||'?',
+        name:a.name||a.id||'未知',
+        status:a.status==='thinking'?'thinking':a.status==='error'?'error':'idle',
+        message:a.message||'',
+        color:a.color||'#888',
+        model:a.model||'',
+      };
+    });
+
+    // 闪光效果
+    agents.forEach(function(a){
+      if(prevStatus[a.id]&&prevStatus[a.id]!==a.status)flashes[a.id]=20;
+    });
+
+    // 插班生：recentSessions 中 agentId 不在持久列表的
+    var pIds=new Set(agents.map(function(a){return a.id;}));
+    var tempSessions=(data.recentSessions||[]).filter(function(s){
+      if(!s.agentId)return false;
+      if(s.sessionId&&s.sessionId.startsWith('subagent:'))return true;
+      return !pIds.has(s.agentId);
+    });
+
+    var newCount=tempSessions.length;
+    while(transferWorkers.length<newCount){
+      var w=AISLE_WALK[Math.floor(Math.random()*AISLE_WALK.length)];
+      transferWorkers.push({r:w.r,c:w.c,target:null,path:[],lastMove:Date.now(),animFrame:0,label:'插班生'});
+    }
+    while(transferWorkers.length>newCount)transferWorkers.pop();
+
+    updateLegend();
+  }catch(e){}
+}
+
+// ─── Legend ───────────────────────────────────────────────────────────────────
+function updateLegend(){
+  var leg=document.getElementById('legend');
+  if(!leg)return;
+  leg.innerHTML='';
+  agents.forEach(function(a,i){
+    var chip=document.createElement('div');chip.className='chip';chip.style.background=rgba(agentColor(a,i),0.75);
+    var dot=document.createElement('div');dot.className='chip-dot';
+    var sc=a.status==='thinking'?'#2ecc71':a.status==='error'?'#e74c3c':'#f1c40f';
+    dot.style.background=sc;
+    var label=document.createElement('span');label.textContent=a.name;
+    chip.appendChild(dot);chip.appendChild(label);leg.appendChild(chip);
+  });
+  if(transferWorkers.length>0){
+    var chip=document.createElement('div');chip.className='chip transfer-chip';
+    chip.textContent='插班生 ('+transferWorkers.length+'人)';
+    leg.appendChild(chip);
+  }
+}
+
+// ─── Main Loop ────────────────────────────────────────────────────────────────
+function loop(){
+  animFrame++;
+  var now=Date.now();
+
+  // 更新聊天气泡
+  chatBubbles=chatBubbles.filter(function(b){b.age++;return b.age<b.maxAge;});
+  if(now-lastChat>5000){spawnChat();lastChat=now;}
+
+  // 闪光倒计时
+  Object.keys(flashes).forEach(function(k){if(flashes[k]>0)flashes[k]--;});
+
+  // 插班生移动
+  updateTransferWorkers();
+
+  // 加载数据（每8秒）
+  if(animFrame-lastLoad>480||lastLoad===0){loadData();lastLoad=animFrame;}
+
+  // 绘制
+  var s=TILE;
+  // Debug info
+  var dbg=document.getElementById('debug');
+  if(dbg){dbg.textContent='瓦:'+TILE+'px · 角色:'+agents.length+' · 插班:'+transferWorkers.length+' · '+COLS+'×'+ROWS+'格';}
+  // 所有格子
+  for(var r=0;r<ROWS;r++){for(var c=0;c<COLS;c++){drawTile(c*s,r*s,MAP[r][c]);}}
+
+  // 黑板文字
+  ctx.fillStyle='rgba(255,255,255,0.7)';
+  ctx.font='bold '+Math.floor(s*0.5)+'px monospace';
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('三年二班',13*s,1.5*s);
+  ctx.font=Math.floor(s*0.28)+'px monospace';
+  ctx.fillText('认真听课',13*s,2.2*s);
+  // 粉笔槽
+  ctx.fillStyle='#8b6540';ctx.fillRect(8*s,y=1*s,s*12,3);
+
+  // 黑板上方装饰线
+  ctx.fillStyle='#1a3a2e';ctx.fillRect(8*s,2*s+3,s*12,2);
+
+  // 课桌椅子（画在人物下方）
+  DESK_POS.forEach(function(pos){
+    var dr=pos[0],dc=pos[1];
+    drawTile(dc*s,dr*s,TILE);
+    // 画课桌（覆盖地板）
+    ctx.fillStyle='#b8874a';
+    ctx.fillRect(dc*s,dr*s-TILE*0.1,s+TILE*0.2,s*0.15);
+    // 画椅子
+    ctx.fillStyle='#7a5a38';
+    ctx.fillRect(dc*s+Math.round(s*0.3),dr*s+2,Math.round(s*0.4),3);
+    ctx.fillStyle='#9a7a58';
+    ctx.fillRect(dc*s+Math.round(s*0.3)-1,dr*s,Math.round(s*0.4)+2,2);
+  });
+
+  // Agent 在座位上
+  agents.forEach(function(a,i){
+    var pos=DESK_POS[i];
+    if(pos){
+      var dr=pos[0],dc=pos[1];
+      drawCharacterAt(dc*s,(dr-1)*s,a,false,flashes[a.id]||0);
+    }
+  });
+
+  // 插班生在过道
+  transferWorkers.forEach(function(tw){
+    drawCharacterAt(tw.c*s,tw.r*s,null,true,0);
+  });
+
+  // 聊天气泡
+  drawChatBubbles();
+
+  requestAnimationFrame(loop);
+}
+
+// 启动
+loadData();
+loop();
+</script>
+</body>
+</html>

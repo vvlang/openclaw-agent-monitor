@@ -879,9 +879,9 @@ const DEFAULT_COST_CONFIG = {
     'google/gemini-2.0-flash': { inputPerM: 0.1, outputPerM: 0.4 },
   },
 };
-const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '30000', 10) || 30000;
+const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '3000', 10) || 3000;
 /** openclaw CLI 命令超时（毫秒）。慢环境或 Agent 多时可设 OPENCLAW_MONITOR_TIMEOUT_MS=60000 等 */
-const COMMAND_TIMEOUT_MS = Math.max(30000, parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '30000', 10) || 30000);
+const COMMAND_TIMEOUT_MS = Math.max(5000, parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '8000', 10) || 8000);
 const ACTIVE_AGE_MS = 120000; // 2 分钟内有活动视为 thinking
 const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
@@ -1109,45 +1109,84 @@ async function getSystemInfo() {
 function getStatusJson() {
   return new Promise((resolve) => {
     const timeoutMs = COMMAND_TIMEOUT_MS;
+    let raw = '';
     let resolved = false;
+    const child = spawn('openclaw', ['status', '--json'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
     const timer = setTimeout(() => {
       if (resolved) return;
       resolved = true;
+      try {
+        child.kill('SIGKILL');
+      } catch (_) {}
       console.warn('[writer] getStatusJson: 超时', timeoutMs, 'ms');
       resolve(null);
     }, timeoutMs);
-    require('child_process').execFile('openclaw', ['status', '--json'], {
-      timeout: timeoutMs,
-      maxBuffer: 5 * 1024 * 1024,
-      env: process.env,
-    }, (err, stdout, stderr) => {
+    function tryParse() {
+      const start = raw.indexOf('{');
+      if (start === -1) return;
+      let depth = 0;
+      let end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        if (raw[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end === -1) return;
+      try {
+        const data = JSON.parse(raw.slice(start, end + 1));
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try {
+          child.kill('SIGKILL');
+        } catch (_) {}
+        resolve(data);
+      } catch (_) {}
+    }
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 2 * 1024 * 1024) {
+        raw = raw.slice(-1024 * 1024);
+      }
+      tryParse();
+    });
+    child.stderr.on('data', () => {});
+    child.on('error', (e) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
-      if (err) {
-        console.warn('[writer] getStatusJson execFile error:', err.message || err);
-        resolve(null);
-        return;
-      }
-      try {
-        const raw = stdout || '';
-        const start = raw.indexOf('{');
-        if (start === -1) { resolve(null); return; }
-        let depth = 0, end = -1;
-        for (let i = start; i < raw.length; i++) {
-          if (raw[i] === '{') depth++;
-          else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-        }
-        if (end === -1) { resolve(null); return; }
-        resolve(JSON.parse(raw.slice(start, end + 1)));
-      } catch (_) {
+      console.warn('[writer] getStatusJson:', e.message || e);
+      resolve(null);
+    });
+    child.on('close', () => {
+      if (resolved) return;
+      tryParse();
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
         resolve(null);
       }
     });
   });
 }
 
+/** 解析 memory-pro list 的 stdout 为条目数组（首行可能是 [plugins]...，需从换行后的 [ 开始） */
+const MEMORY_DEBUG = process.env.OPENCLAW_MONITOR_MEMORY_DEBUG === '1';
+/** scope 最大长度，防止超长输入导致 DoS；与 GET /memory?scope= 校验一致 */
+const MEMORY_SCOPE_MAX_LENGTH = 128;
+const MEMORY_JSON_MAX_LENGTH = 1024 * 1024; // 1MB，与 exec maxBuffer 配合，防止过大 JSON 解析
+const MEMORY_JSON_MAX_DEPTH = 100; // 最大嵌套深度，防止恶意深层 JSON 导致堆栈溢出
 
+/** 粗略扫描 JSON 片段的最大括号嵌套深度（不解析字符串内容，仅统计 [ { ] }） */
 function getJsonSliceMaxDepth(slice) {
   let depth = 0;
   let maxDepth = 0;
@@ -1856,15 +1895,6 @@ const server = http.createServer((req, res) => {
   if (serveCostConfigApi(req, res)) return;
   if (serveCostHistoryApi(req, res)) return;
   serveStatic(req, res);
-});
-
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.warn('[writer] port', SERVER_PORT, 'in use, exiting (likely a stale --one-shot child)');
-    process.exit(4); // Exit with special code so parent knows not to restart immediately
-  } else {
-    console.error('[writer] server error:', err.message || err);
-  }
 });
 
 server.listen(SERVER_PORT, () => {
