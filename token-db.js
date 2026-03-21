@@ -151,6 +151,58 @@ function importFromTokenCumulativeState(stateFilePath) {
 }
 
 /**
+ * 按天聚合 Token 消耗（仅来自增量日志，不含基线一次性导入）。
+ * 返回结构：{ date, totalTokens, totalCost, byModel: [{ modelId, vendor, tokens, cost }] }
+ * @param {number} limitDays - 最近多少天
+ */
+function getStatsByDay(limitDays) {
+  if (!db) init();
+  const since = new Date();
+  since.setDate(since.getDate() - limitDays);
+  const sinceStr = since.toISOString().slice(0, 10); // 'YYYY-MM-DD'
+
+  // 读取费用配置（通过父模块读取；这里直接读 JSON 文件）
+  let costConfig = {};
+  try {
+    const fs = require('fs');
+    const cfgPath = require('path').join(__dirname, 'model-pricing.json');
+    const raw = fs.readFileSync(cfgPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    costConfig = parsed && parsed.models ? parsed.models : {};
+  } catch (_) {}
+
+  const rows = db.prepare(`
+    SELECT recorded_at AS rec,
+           vendor,
+           model_id AS modelId,
+           tokens
+      FROM token_usage_log
+     WHERE recorded_at >= ?
+  `).all(sinceStr);
+
+  // 按天聚合
+  const byDay = {};
+  rows.forEach(({ rec, vendor, modelId, tokens }) => {
+    const date = rec.slice(0, 10); // 'YYYY-MM-DD'
+    if (!byDay[date]) byDay[date] = {};
+    if (!byDay[date][modelId]) byDay[date][modelId] = { vendor, tokens: 0, cost: 0 };
+    byDay[date][modelId].tokens += tokens;
+    const price = costConfig[modelId];
+    if (price) byDay[date][modelId].cost += (tokens / 1e6) * ((price.blendedPerM != null ? price.blendedPerM : (price.inputPerM || 0)));
+  });
+
+  return Object.keys(byDay).sort().map((date) => {
+    let totalTokens = 0, totalCost = 0;
+    const byModel = Object.entries(byDay[date]).map(([modelId, v]) => {
+      totalTokens += v.tokens;
+      totalCost += v.cost;
+      return { modelId, vendor: v.vendor, tokens: v.tokens, cost: parseFloat(v.cost.toFixed(6)) };
+    });
+    return { date, totalTokens, totalCost: parseFloat(totalCost.toFixed(6)), byModel };
+  });
+}
+
+/**
  * 按 Agent 汇总 Token（来自增量日志 + 基线）
  * @returns {{ agentId: string, total: number }[]}
  */
@@ -186,6 +238,7 @@ module.exports = {
   getStatsByVendor,
   getStatsByVendorModel,
   getStatsByAgent,
+  getStatsByDay,
   importFromTokenCumulativeState,
   extractVendor,
   close,

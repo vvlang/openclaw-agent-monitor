@@ -1001,8 +1001,21 @@ function readSessionContentPreview(sessionDir, sessionId) {
   return messages;
 }
 
-/** 采集本机系统信息：CPU、内存、磁盘、IP、网络 */
-function getSystemInfo() {
+/** 执行命令并返回 stdout（异步，非阻塞），失败返回 null */
+function execAsync(cmd, args, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], shell: false, timeout: timeoutMs });
+    let out = '', err = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} resolve(null); }, timeoutMs);
+    child.stdout.on('data', (chunk) => { out += chunk.toString('utf-8'); });
+    child.stderr.on('data', (chunk) => { err += chunk.toString('utf-8'); });
+    child.on('close', () => { clearTimeout(timer); resolve(out || null); });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+  });
+}
+
+/** 采集本机系统信息：CPU、内存、磁盘、IP、网络（全部异步，无 execSync 阻塞） */
+async function getSystemInfo() {
   const info = {
     cpu: null,
     memory: null,
@@ -1039,12 +1052,12 @@ function getSystemInfo() {
   }
   try {
     if (os.platform() === 'darwin') {
-      const out = execSync('top -l 1 -n 0 2>/dev/null', { encoding: 'utf-8', maxBuffer: 8192, timeout: COMMAND_TIMEOUT_MS });
-      const m = out.match(/([\d.]+)\s*%\s*idle/);
+      const out = await execAsync('top', ['-l', '1', '-n', '0'], COMMAND_TIMEOUT_MS);
+      const m = out && out.match(/([\d.]+)\s*%\s*idle/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1]));
     } else if (os.platform() === 'linux') {
-      const out = execSync("top -b -n 1 2>/dev/null | grep '^%Cpu' || true", { encoding: 'utf-8', maxBuffer: 4096, timeout: COMMAND_TIMEOUT_MS });
-      const m = out.match(/([\d.]+)\s*%\s*id(?:le)?\b|([\d.]+)\s+id\b/);
+      const out = await execAsync('top', ['-b', '-n', '1'], COMMAND_TIMEOUT_MS);
+      const m = out && out.match(/([\d.]+)\s*%\s*id(?:le)?\b|([\d.]+)\s+id\b/);
       if (m) info.cpu = Math.round(100 - parseFloat(m[1] || m[2]));
     }
     // top 失败时用 loadavg 估算 CPU（非实测值，仅作回退）
@@ -1057,7 +1070,8 @@ function getSystemInfo() {
     console.warn('[writer] getSystemInfo cpu/top:', e.message || e);
   }
   try {
-    const out = execSync('df -P . 2>/dev/null || df -P / 2>/dev/null', { encoding: 'utf-8', maxBuffer: 4096, timeout: COMMAND_TIMEOUT_MS });
+    const out = await execAsync('df', ['-P', '.'], COMMAND_TIMEOUT_MS);
+    if (!out) throw new Error('df returned null');
     const lines = out.trim().split('\n').filter(Boolean);
     const dataLine = lines[lines.length - 1]; // 最后一行是当前目录/根分区数据
     const pct = dataLine.match(/(\d+)%/); // Capacity 列如 "22%" 或 "69% /"，不要求行尾
@@ -1069,7 +1083,7 @@ function getSystemInfo() {
     if (info.ip) {
       // ⚠️ 硬编码命令，切勿从环境变量或外部输入构建命令以防止命令注入
       const pingCmd = os.platform() === 'darwin' ? '/sbin/ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
-      execSync(pingCmd, { encoding: 'utf-8', timeout: COMMAND_TIMEOUT_MS });
+      await execAsync('/sbin/ping', ['-c', '1', '-t', '2', '8.8.8.8'], COMMAND_TIMEOUT_MS);
       info.network = '在线';
     } else {
       info.network = '无外网 IP';
@@ -1295,7 +1309,7 @@ async function updateStatus() {
       lastUpdated: new Date().toISOString(),
       agents: prev ? prev.agents : [],
       gateway: { reachable: false, error: 'openclaw status 执行失败' },
-      system: prev ? prev.system : getSystemInfo(),
+      system: prev ? prev.system : await getSystemInfo(),
       tokenCumulative: { byAgent: dbByAgent, global: dbGlobal },
       tokenByVendor: prev ? prev.tokenByVendor : [],
       tokenByVendorModel: prev ? prev.tokenByVendorModel : [],
@@ -1550,7 +1564,7 @@ async function updateStatus() {
     return out;
   });
 
-  const system = getSystemInfo();
+  const system = await getSystemInfo();
 
   const rawControlUrl = gateway.reachable ? (gateway.url || GATEWAY_FALLBACK_URL) : null;
   const controlUiUrl = rawControlUrl ? toHttpUrl(rawControlUrl) : null;
@@ -1828,22 +1842,70 @@ function serveCostConfigApi(req, res) {
   return true;
 }
 
+/** 成本历史 API：GET /cost-history?days=30
+ *  返回近 N 天每日 Token 消耗与费用（来自增量日志）。
+ *  费用基于 /cost-config 中的模型单价计算。
+ */
+function serveCostHistoryApi(req, res) {
+  const parsed = url.parse(req.url, true);
+  if (parsed.pathname !== '/cost-history') return false;
+  const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  try {
+    tokenDb.init();
+    const history = tokenDb.getStatsByDay(days);
+    res.end(JSON.stringify({ days, history }, null, 2));
+  } catch (e) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message || String(e) }));
+  }
+  return true;
+}
+
 const server = http.createServer((req, res) => {
   if (serveMemoryApi(req, res)) return;
   if (serveCostConfigApi(req, res)) return;
+  if (serveCostHistoryApi(req, res)) return;
   serveStatic(req, res);
 });
 
 server.listen(SERVER_PORT, () => {
   console.log('监控仪表盘: http://localhost:' + SERVER_PORT + '/agent-dashboard.html');
   console.log('交互式记忆: GET /memory?scope=global 或 ?scope=agent:<id>');
+  // HTTP 服务已独立，启动后台轮询（每次开独立进程，永不阻塞主 HTTP）
+  pollLoop();
 });
 
-let updateStatusRunning = false;
-setInterval(() => {
-  if (updateStatusRunning) return;
-  updateStatusRunning = true;
-  updateStatus().finally(() => { updateStatusRunning = false; });
-}, CHECK_INTERVAL_MS);
-updateStatus();
+function pollLoop() {
+  const doUpdate = () => {
+    // 每次轮询开一个完全独立的子进程来跑 updateStatus，主进程不阻塞
+    const child = spawn(process.execPath, [__filename, '--one-shot'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, OPENCLAW_WRITER_PID: String(process.pid) },
+      detached: false,
+    });
+    child.stdout.on('data', (c) => process.stdout.write(c));
+    child.stderr.on('data', (c) => process.stderr.write(c));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        console.warn('[writer] update status child exit code:', code);
+      }
+    });
+  };
+  doUpdate();
+  setInterval(doUpdate, CHECK_INTERVAL_MS);
+}
+
+// 单次运行模式（--one-shot）：不启动 HTTP 服务器，直接执行一次 updateStatus 后退出
+if (process.argv.includes('--one-shot')) {
+  const originalServe = server.listen;
+  // 临时替换 server.listen 为空操作，让 updateStatus() 直接执行后 exit
+  server.listen = (...args) => { /* noop */ return { close: () => {} }; };
+  const origHandler = server.on;
+  server.on = (...a) => { /* noop */ return server; };
+  updateStatus().then(() => process.exit(0)).catch(() => process.exit(1));
+} else {
+  // 正常模式：已由 pollLoop() 启动轮询
+}
 // 不再定时拉取记忆，仅在用户点击仪表盘「记忆」时通过 GET /memory?scope= 按需调用向量库

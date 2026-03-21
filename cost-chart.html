@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>💰 成本图表 · OpenClaw</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1117;color:#e2e8f0;font-family:'Courier New',monospace;min-height:100vh;padding:16px;user-select:none}
+#header{font-size:1.1em;color:#ffd700;letter-spacing:2px;margin-bottom:10px;display:flex;align-items:center;gap:12px}
+#header span{font-size:0.7em;color:#888;letter-spacing:0}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:10px}
+.card{background:#1a1f2e;border:1px solid #2a3040;border-radius:8px;padding:10px 14px}
+.card .label{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:1px}
+.card .value{font-size:1.3em;font-weight:bold;color:#fff;margin-top:2px}
+.card .sub{font-size:9px;color:#555;margin-top:1px}
+.range-btns{display:flex;gap:6px;margin-bottom:10px}
+.range-btn{padding:4px 14px;border:1px solid #2a3040;border-radius:5px;background:#1a1f2e;color:#888;font-size:11px;cursor:pointer}
+.range-btn.active{background:#ffd700;color:#111;border-color:#ffd700;font-weight:bold}
+#canvas-wrap{position:relative;background:#1a1f2e;border:1px solid #2a3040;border-radius:8px;overflow:hidden;padding:8px}
+#canvas-wrap canvas{display:block;width:100%}
+#legend{position:absolute;top:8px;right:8px;display:flex;flex-wrap:wrap;gap:4px;max-width:50%}
+.model-chip{display:inline-block;padding:2px 6px;border-radius:4px;font-size:9px;color:#fff;white-space:nowrap}
+#loading{text-align:center;padding:40px;color:#555;font-size:13px}
+#error{color:#e53e3e;padding:20px;text-align:center;font-size:12px}
+</style>
+</head>
+<body>
+<div id="header">💰 成本图表<span>· OpenClaw Agent</span></div>
+
+<div class="range-btns">
+  <button class="range-btn" data-days="7">7天</button>
+  <button class="range-btn active" data-days="30">30天</button>
+  <button class="range-btn" data-days="90">90天</button>
+</div>
+
+<div class="cards" id="cards">
+  <div class="card"><div class="label">总Token</div><div class="value" id="totalTokens">--</div><div class="sub" id="avgDay">日均 --</div></div>
+  <div class="card"><div class="label">总费用</div><div class="value" id="totalCost">--</div><div class="sub" id="avgCost">日均 --</div></div>
+  <div class="card"><div class="label">峰值日</div><div class="value" id="peakDay">--</div><div class="sub" id="peakTokens">--</div></div>
+  <div class="card"><div class="label">费用峰值</div><div class="value" id="peakCost">--</div><div class="sub" id="peakCostDay">--</div></div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="legend"></div>
+</div>
+<div id="loading">加载中...</div>
+<div id="error" style="display:none"></div>
+
+<script>
+// ─── Config ───────────────────────────────────────────────────────────────────
+const API = 'http://127.0.0.1:3880/cost-history';
+let days = 30;
+let rawData = [];
+let maxTokens = 0;
+let maxCost = 0;
+const PALETTE = [
+  '#f59e0b','#3b82f6','#10b981','#f43f5e','#8b5cf6',
+  '#06b6d4','#f97316','#d946ef','#84cc16','#0ea5e9',
+  '#ec4899','#14b8a6','#f59e0b','#6366f1','#22c55e'
+];
+
+// ─── Canvas setup ─────────────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, H2 = 0;
+
+function resize() {
+  const wrap = document.getElementById('canvas-wrap');
+  W = wrap.clientWidth - 16;
+  H = Math.min(280, window.innerHeight * 0.4);
+  H2 = Math.min(160, window.innerHeight * 0.2);
+  canvas.width = W;
+  canvas.height = H + H2 + 20;
+  canvas.style.height = (H + H2 + 20) + 'px';
+}
+window.addEventListener('resize', () => { resize(); if (rawData.length) draw(rawData); });
+resize();
+
+// ─── API ─────────────────────────────────────────────────────────────────────
+async function fetchData(d) {
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('error').style.display = 'none';
+  try {
+    const r = await fetch(`${API}?days=${d}`);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const json = await r.json();
+    rawData = json.history || [];
+    updateCards(rawData);
+    document.getElementById('loading').style.display = 'none';
+    resize();
+    draw(rawData);
+  } catch (e) {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('error').style.display = 'block';
+    document.getElementById('error').textContent = '加载失败: ' + e.message + '（确保 writer 已启动）';
+  }
+}
+
+// ─── Cards ───────────────────────────────────────────────────────────────────
+function fmtNum(n) {
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function updateCards(history) {
+  if (!history.length) return;
+  const totalTokens = history.reduce((s, d) => s + d.totalTokens, 0);
+  const totalCost = history.reduce((s, d) => s + d.totalCost, 0);
+  const avgDay = totalTokens / history.length;
+  const avgCost = totalCost / history.length;
+  const peakDayData = history.reduce((m, d) => d.totalTokens > m.totalTokens ? d : m, history[0]);
+  const peakCostData = history.reduce((m, d) => d.totalCost > m.totalCost ? d : m, history[0]);
+
+  document.getElementById('totalTokens').textContent = fmtNum(totalTokens);
+  document.getElementById('avgDay').textContent = '日均 ' + fmtNum(Math.round(avgDay));
+  document.getElementById('totalCost').textContent = '$' + totalCost.toFixed(4);
+  document.getElementById('avgCost').textContent = '日均 $' + avgCost.toFixed(4);
+  document.getElementById('peakDay').textContent = peakDayData.date.slice(5);
+  document.getElementById('peakTokens').textContent = fmtNum(peakDayData.totalTokens);
+  document.getElementById('peakCost').textContent = '$' + peakCostData.totalCost.toFixed(4);
+  document.getElementById('peakCostDay').textContent = peakCostData.date.slice(5);
+}
+
+// ─── Drawing ─────────────────────────────────────────────────────────────────
+function draw(history) {
+  if (!history.length) return;
+  maxTokens = Math.max(...history.map(d => d.totalTokens), 1);
+  maxCost = Math.max(...history.map(d => d.totalCost), 0.001);
+
+  // Collect all model names for legend
+  const allModels = new Map();
+  history.forEach(d => d.byModel && d.byModel.forEach(m => {
+    if (!allModels.has(m.modelId)) allModels.set(m.modelId, PALETTE[allModels.size % PALETTE.length]);
+  }));
+  updateLegend([...allModels]);
+
+  ctx.clearRect(0, 0, W, H + H2 + 20);
+
+  // ── Top chart: tokens + cost lines ──
+  drawTopChart(history);
+
+  // ── Divider ──
+  ctx.fillStyle = '#2a3040';
+  ctx.fillRect(0, H, W, 1);
+
+  // ── Bottom chart: stacked bars ──
+  drawBottomBars(history);
+}
+
+function drawTopChart(history) {
+  const PAD_L = 55, PAD_R = 10, PAD_T = 10, PAD_B = 25;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H - PAD_T - PAD_B;
+
+  // Grid
+  ctx.strokeStyle = '#1e2535'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD_T + chartH * i / 4;
+    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(PAD_L + chartW, y); ctx.stroke();
+    // Y labels (tokens, left)
+    ctx.fillStyle = '#666'; ctx.font = '9px Courier New'; ctx.textAlign = 'right';
+    const v = Math.round(maxTokens * (1 - i / 4));
+    ctx.fillText(fmtNum(v), PAD_L - 4, y + 3);
+  }
+
+  // Y labels (cost, right)
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD_T + chartH * i / 4;
+    ctx.fillStyle = '#f59e0b80'; ctx.font = '9px Courier New'; ctx.textAlign = 'left';
+    const v = maxCost * (1 - i / 4);
+    ctx.fillText('$' + v.toFixed(4), PAD_L + chartW + 4, y + 3);
+  }
+
+  // X labels
+  const n = history.length;
+  const step = Math.max(1, Math.floor(n / 8));
+  history.forEach((d, i) => {
+    if (i % step !== 0 && i !== n-1) return;
+    const x = PAD_L + chartW * i / (n - 1 || 1);
+    ctx.fillStyle = '#555'; ctx.font = '8px Courier New'; ctx.textAlign = 'center';
+    ctx.fillText(d.date.slice(5), x, H - 5);
+  });
+
+  // Tokens line (blue)
+  ctx.beginPath();
+  ctx.strokeStyle = '#3b82f6';
+  ctx.lineWidth = 2;
+  history.forEach((d, i) => {
+    const x = PAD_L + chartW * i / (n - 1 || 1);
+    const y = PAD_T + chartH * (1 - d.totalTokens / maxTokens);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Token area fill
+  ctx.lineTo(PAD_L + chartW, PAD_T + chartH);
+  ctx.lineTo(PAD_L, PAD_T + chartH);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(59,130,246,0.08)';
+  ctx.fill();
+
+  // Cost line (amber)
+  ctx.beginPath();
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2;
+  history.forEach((d, i) => {
+    const x = PAD_L + chartW * i / (n - 1 || 1);
+    const y = PAD_T + chartH * (1 - d.totalCost / maxCost);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Dots
+  history.forEach((d, i) => {
+    const x = PAD_L + chartW * i / (n - 1 || 1);
+    const y = PAD_T + chartH * (1 - d.totalCost / maxCost);
+    ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2);
+    ctx.fillStyle = '#f59e0b'; ctx.fill();
+  });
+
+  // Legend line labels
+  ctx.fillStyle = '#3b82f6'; ctx.font = '9px Courier New'; ctx.textAlign = 'left';
+  ctx.fillText('● Token', PAD_L + 4, PAD_T + 12);
+  ctx.fillStyle = '#f59e0b'; ctx.fillText('● 费用', PAD_L + 58, PAD_T + 12);
+}
+
+function drawBottomBars(history) {
+  const PAD_L = 55, PAD_R = 10, PAD_T = H + 8, PAD_B = 18;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H2 - PAD_T + H - PAD_B;
+
+  const n = history.length;
+  const barW = Math.max(2, Math.min(20, (chartW / n) - 1));
+
+  // Collect all model names
+  const allModelIds = [];
+  const modelColor = {};
+  const paletteIdx = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14];
+  history.forEach(d => (d.byModel || []).forEach(m => {
+    if (!modelColor[m.modelId]) {
+      modelColor[m.modelId] = PALETTE[allModelIds.length % PALETTE.length];
+      allModelIds.push(m.modelId);
+    }
+  }));
+
+  history.forEach((d, i) => {
+    const xBase = PAD_L + chartW * i / n + 0.5;
+    const models = (d.byModel || []).slice().sort((a, b) => b.tokens - a.tokens);
+    let stackY = PAD_T + chartH;
+
+    models.forEach(m => {
+      const barH = chartH * m.tokens / maxTokens;
+      ctx.fillStyle = modelColor[m.modelId] || '#666';
+      ctx.fillRect(xBase, stackY - barH, barW, barH);
+      stackY -= barH;
+    });
+  });
+
+  // X labels
+  const step = Math.max(1, Math.floor(n / 8));
+  history.forEach((d, i) => {
+    if (i % step !== 0 && i !== n-1) return;
+    const x = PAD_L + chartW * i / n + barW/2;
+    ctx.fillStyle = '#555'; ctx.font = '8px Courier New'; ctx.textAlign = 'center';
+    ctx.fillText(d.date.slice(5), x, H + H2 + 2);
+  });
+
+  // Grid
+  ctx.strokeStyle = '#1e2535'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = PAD_T + chartH * i / 3;
+    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(PAD_L + chartW, y); ctx.stroke();
+  }
+}
+
+function updateLegend(models) {
+  const leg = document.getElementById('legend');
+  leg.innerHTML = '';
+  const maxW = Math.floor(W / 80);
+  models.slice(0, maxW).forEach(([modelId, color]) => {
+    const chip = document.createElement('div');
+    chip.className = 'model-chip';
+    chip.style.background = color + '33';
+    chip.style.border = '1px solid ' + color;
+    chip.textContent = modelId.split('/').pop().split(':')[0];
+    chip.title = modelId;
+    leg.appendChild(chip);
+  });
+}
+
+// ─── Range buttons ───────────────────────────────────────────────────────────
+document.querySelectorAll('.range-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    days = parseInt(btn.dataset.days);
+    fetchData(days);
+  });
+});
+
+// ─── Init ───────────────────────────────────────────────────────────────────
+fetchData(days);
+setInterval(() => fetchData(days), 60000);
+</script>
+</body>
+</html>
