@@ -1103,9 +1103,9 @@ async function getSystemInfo() {
  * 注意：此处必须使用真实 OPENCLAW_DIR（需读 agents/sessions），超时或失败时 openclaw 子进程可能在 ~/.openclaw 写临时文件。
  * @see https://github.com/openclaw/openclaw/issues/11843
  */
-function getStatusJson() {
+function getStatusJsonImpl() {
   return new Promise((resolve) => {
-    const timeoutMs = COMMAND_TIMEOUT_MS;
+    const timeoutMs = Math.max(60000, COMMAND_TIMEOUT_MS);
     let resolved = false;
     const timer = setTimeout(() => {
       if (resolved) return;
@@ -1147,6 +1147,23 @@ function getStatusJson() {
       }
     });
   });
+}
+
+/** 带重试的 getStatusJson：超时后等待3秒重试，最多3次 */
+function getStatusJson() {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 3000;
+  async function tryWithRetry(attempt) {
+    if (attempt > 1) {
+      console.warn(`[writer] getStatusJson: 超时, 重试第${attempt - 1}次 (最多${MAX_RETRIES}次)`);
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    }
+    const result = await getStatusJsonImpl();
+    if (result !== null) return result;
+    if (attempt >= MAX_RETRIES) return null;
+    return tryWithRetry(attempt + 1);
+  }
+  return tryWithRetry(1);
 }
 
 
@@ -1285,6 +1302,7 @@ async function updateStatus() {
   ]);
 
   if (!status) {
+    console.warn('[writer] openclaw status 超时，进入降级模式');
     // openclaw status 超时，但 gateway 在线 → 降级模式：保留之前的 Agent 缓存，只更新在线状态
     let prev = null;
     try { prev = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8')); } catch (_) {}
@@ -1392,7 +1410,7 @@ async function updateStatus() {
         if (delta > 0) {
           rec.cumulativeTokens += delta;
           tokenState.byModel[modelId] = (tokenState.byModel[modelId] || 0) + delta;
-          try { tokenDb.init(); tokenDb.insertUsage({ modelId, tokens: delta, agentId: a.id, sessionId }); } catch (_) {}
+          try { tokenDb.init(); tokenDb.insertUsage({ modelId, tokens: delta, calls: 1, agentId: a.id, sessionId }); } catch (e) { console.warn('[writer] insertUsage 失败:', e.message || e); }
         }
         rec.lastTotalTokens = totalTokens;
       } else {
@@ -1400,7 +1418,7 @@ async function updateStatus() {
           rec.cumulativeTokens += rec.lastTotalTokens;
           const lastModel = rec.lastModelId || 'unknown';
           tokenState.byModel[lastModel] = (tokenState.byModel[lastModel] || 0) + rec.lastTotalTokens;
-          try { tokenDb.init(); tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, agentId: a.id, sessionId: rec.lastSessionId }); } catch (_) {}
+          try { tokenDb.init(); tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, calls: 1, agentId: a.id, sessionId: rec.lastSessionId }); } catch (e) { console.warn('[writer] insertUsage 失败:', e.message || e); }
         }
         rec.lastSessionId = sessionId;
         rec.lastTotalTokens = totalTokens;
@@ -1413,9 +1431,12 @@ async function updateStatus() {
   });
   // 当 status 不可用时，直接从 SQLite 数据库读取各 Agent 的真实累计（绕过 openclaw status 超时问题）
   if (!statusAvailable) {
+    console.warn('[writer] openclaw status 超时，进入降级模式');
     try {
       tokenDb.init();
       const dbByAgent = tokenDb.getStatsByAgent();
+      // 重新从数据库计算 global，避免内存值+数据库值重复累加
+      tokenCumulativeGlobal = 0;
       dbByAgent.forEach(({ agentId, total }) => {
         cumulativeByAgent[agentId] = total;
         tokenCumulativeGlobal += total;
@@ -1854,10 +1875,35 @@ function serveCostHistoryApi(req, res) {
   return true;
 }
 
+/** 调用统计 API：GET /call-stats
+ *  返回按供应商·模型的调用次数统计和每5小时窗口历史（来自增量日志）。
+ *  返回结构：{ byVendorModel, totalCalls, history: { stats, todayTotal } }
+ */
+function serveCallStatsApi(req, res) {
+  const parsed = url.parse(req.url, true);
+  if (parsed.pathname !== '/call-stats') return false;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  try {
+    tokenDb.init();
+    const byVendorModel = tokenDb.getCallStatsByVendorModel();
+    const totalCalls = byVendorModel.reduce((sum, r) => sum + r.calls, 0);
+    const stats = tokenDb.getCallStatsByHourWindow(1, 5);
+    const today = new Date().toISOString().slice(0, 10);
+    const todayTotal = stats.filter(s => s.date === today).reduce((sum, s) => sum + s.calls, 0);
+    res.end(JSON.stringify({ byVendorModel, totalCalls, history: { stats, todayTotal } }, null, 2));
+  } catch (e) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message || String(e) }));
+  }
+  return true;
+}
+
 const server = http.createServer((req, res) => {
   if (serveMemoryApi(req, res)) return;
   if (serveCostConfigApi(req, res)) return;
   if (serveCostHistoryApi(req, res)) return;
+  if (serveCallStatsApi(req, res)) return;
   serveStatic(req, res);
 });
 

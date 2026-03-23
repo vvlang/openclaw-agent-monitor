@@ -174,6 +174,16 @@
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">API 调用次数（按供应商·模型）</h2>
+                <div id="call-stats" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 mb-2">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+                <div id="call-history" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
+                    <div class="text-slate-600 italic">等待数据...</div>
+                </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
                 <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按供应商·模型，数据库）</h2>
                 <p class="text-[10px] text-slate-500 mb-2">本地 SQLite 按次写入的准确统计；供应商为 model_id 首段（如 nvidia、anthropic）。</p>
                 <div id="token-by-vendor" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 mb-2">
@@ -525,6 +535,47 @@
                     '<td class="py-1 text-right text-emerald-400">' + formatCost(cs.totalEstimatedCost) + '</td></tr>';
             }
             el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 pr-2 text-right">累计</th><th class="py-0.5 text-right">预估成本</th></tr></thead><tbody>' + rows + totalLine + '</tbody></table>';
+        }
+
+        function renderCallStats() {
+            var el = document.getElementById('call-stats');
+            var historyEl = document.getElementById('call-history');
+            if (!el && !historyEl) return;
+
+            fetch('call-stats')
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(data) {
+                    if (!data) return;
+
+                    var byVendorModel = data.byVendorModel || [];
+                    var totalCalls = data.totalCalls || 0;
+                    if (byVendorModel.length === 0) {
+                        el.innerHTML = '<div class="text-slate-600 italic">暂无调用记录</div>';
+                    } else {
+                        var rows = byVendorModel.map(function(r) {
+                            var label = modelDisplayName(r.modelId);
+                            return '<tr class="border-b border-slate-700/50"><td class="py-0.5 pr-2">' + escapeHtml(r.vendor) + '</td><td class="py-0.5 pr-2" title="' + escapeHtml(r.modelId) + '">' + escapeHtml(label) + '</td><td class="py-0.5 text-right text-cyan-400/90">' + r.calls.toLocaleString() + '</td></tr>';
+                        }).join('');
+                        el.innerHTML = '<div class="text-slate-300 mb-1">今日调用 <span class="text-cyan-400 font-bold">' + totalCalls.toLocaleString() + '</span> 次</div>' +
+                            '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">供应商</th><th class="py-0.5 pr-2">模型</th><th class="py-0.5 text-right">调用</th></tr></thead><tbody>' + rows + '</tbody></table>';
+                    }
+
+                    var stats = (data.history && data.history.stats) || [];
+                    var todayTotal = (data.history && data.history.todayTotal) || 0;
+                    if (stats.length === 0) {
+                        historyEl.innerHTML = '<div class="text-slate-600 italic">暂无窗口数据</div>';
+                    } else {
+                        var rows = stats.map(function(s) {
+                            return '<tr class="border-b border-slate-700/50"><td class="py-0.5 pr-2">' + s.date + ' ' + (s.windowStart + '-' + s.windowEnd) + '</td><td class="py-0.5 text-right text-cyan-400/90">' + s.calls.toLocaleString() + '</td></tr>';
+                        }).join('');
+                        historyEl.innerHTML = '<div class="text-slate-300 mb-1">每5小时窗口 <span class="text-cyan-400 font-bold">' + todayTotal.toLocaleString() + '</span> 今日合计</div>' +
+                            '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">时间段</th><th class="py-0.5 text-right">调用</th></tr></thead><tbody>' + rows + '</tbody></table>';
+                    }
+                })
+                .catch(function() {
+                    if (el) el.innerHTML = '<div class="text-slate-600 italic">加载失败</div>';
+                    if (historyEl) historyEl.innerHTML = '<div class="text-slate-600 italic">加载失败</div>';
+                });
         }
 
         function renderModelsSummary(data) {
@@ -919,6 +970,7 @@
             renderTokenStats(data);
             renderTokenByVendorAndModel(data);
             renderTokenByModel(data);
+            renderCallStats(data);
             renderModelsSummary(data);
             renderPluginsSummary(data);
             renderRecentSessions(data);
