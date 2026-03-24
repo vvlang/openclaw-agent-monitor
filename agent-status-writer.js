@@ -1099,52 +1099,69 @@ async function getSystemInfo() {
 
 /**
  * 拉取 openclaw status --json。使用 spawn + 流式读取，读到完整 JSON 后立即 kill 子进程，
- * 避免在安装插件（如 openclaw-self-healing）后 CLI 加载插件导致进程不退出、execSync 超时无数据。
- * 注意：此处必须使用真实 OPENCLAW_DIR（需读 agents/sessions），超时或失败时 openclaw 子进程可能在 ~/.openclaw 写临时文件。
- * @see https://github.com/openclaw/openclaw/issues/11843
+ * 避免在安装插件后 CLI 加载插件导致进程不退出。
+ * 使用 SIGKILL 超时，比 execFile 的 timeout 选项更可靠。
+ * 注意：此处必须使用真实 OPENCLAW_DIR（需读 agents/sessions）。
  */
 function getStatusJsonImpl() {
   return new Promise((resolve) => {
-    const timeoutMs = Math.max(60000, COMMAND_TIMEOUT_MS);
+    // 增加超时到 120s，避免插件多时不够用
+    const timeoutMs = Math.max(120000, COMMAND_TIMEOUT_MS);
     let resolved = false;
+    let raw = '';
+    const child = spawn('openclaw', ['status', '--json'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
+    });
     const timer = setTimeout(() => {
       if (resolved) return;
       resolved = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
       console.warn('[writer] getStatusJson: 超时', timeoutMs, 'ms');
       resolve(null);
     }, timeoutMs);
-    require('child_process').execFile('openclaw', ['status', '--json'], {
-      timeout: timeoutMs,
-      maxBuffer: 5 * 1024 * 1024,
-      env: process.env,
-    }, (err, stdout) => {
+    child.stdout.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 10 * 1024 * 1024) raw = raw.slice(-5 * 1024 * 1024);
+      // 流式解析：边收数据边找完整 JSON
       if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      if (err) {
-        console.warn('[writer] getStatusJson execFile error:', err.message || err);
-        resolve(null);
-        return;
-      }
-      const raw = stdout || '';
-      // execFile gives complete stdout — try direct parse first, fall back to search
-      try {
-        resolve(JSON.parse(raw));
-        return;
-      } catch (_) {}
       const start = raw.indexOf('{');
-      if (start === -1) { resolve(null); return; }
+      if (start === -1) return;
       let depth = 0, end = -1;
       for (let i = start; i < raw.length; i++) {
         if (raw[i] === '{') depth++;
         else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
       }
-      if (end === -1) { resolve(null); return; }
+      if (end === -1) return;
       try {
-        resolve(JSON.parse(raw.slice(start, end + 1)));
-      } catch (_) {
-        resolve(null);
+        const data = JSON.parse(raw.slice(start, end + 1));
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try { child.kill('SIGKILL'); } catch (_) {}
+        resolve(data);
+      } catch (_) {}
+    });
+    child.stderr.on('data', (chunk) => {
+      // 忽略插件日志
+    });
+    child.on('error', (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      console.warn('[writer] getStatusJson spawn error:', err.message || err);
+      resolve(null);
+    });
+    child.on('close', (code) => {
+      if (resolved) return;
+      // 子进程退出但还没解析出完整 JSON
+      resolved = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        console.warn('[writer] getStatusJson: 子进程退出码', code);
       }
+      resolve(null);
     });
   });
 }
@@ -1916,42 +1933,34 @@ server.on('error', (err) => {
   }
 });
 
-server.listen(SERVER_PORT, () => {
-  console.log('监控仪表盘: http://localhost:' + SERVER_PORT + '/agent-dashboard.html');
-  console.log('交互式记忆: GET /memory?scope=global 或 ?scope=agent:<id>');
-  // HTTP 服务已独立，启动后台轮询（每次开独立进程，永不阻塞主 HTTP）
-  pollLoop();
-});
-
-function pollLoop() {
-  const doUpdate = () => {
-    // 每次轮询开一个完全独立的子进程来跑 updateStatus，主进程不阻塞
-    const child = spawn(process.execPath, [__filename, '--one-shot'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, OPENCLAW_WRITER_PID: String(process.pid) },
-      detached: false,
-    });
-    child.stdout.on('data', (c) => process.stdout.write(c));
-    child.stderr.on('data', (c) => process.stderr.write(c));
-    child.on('close', (code) => {
-      if (code !== 0) {
-        console.warn('[writer] update status child exit code:', code);
-      }
-    });
-  };
-  doUpdate();
-  setInterval(doUpdate, CHECK_INTERVAL_MS);
-}
-
 // 单次运行模式（--one-shot）：不启动 HTTP 服务器，直接执行一次 updateStatus 后退出
 if (process.argv.includes('--one-shot')) {
+  // 必须在 server.listen 调用之前替换，否则端口已被绑定
   const originalServe = server.listen;
-  // 临时替换 server.listen 为空操作，让 updateStatus() 直接执行后 exit
   server.listen = (...args) => { /* noop */ return { close: () => {} }; };
   const origHandler = server.on;
   server.on = (...a) => { /* noop */ return server; };
   updateStatus().then(() => process.exit(0)).catch(() => process.exit(1));
 } else {
-  // 正常模式：已由 pollLoop() 启动轮询
+  server.listen(SERVER_PORT, () => {
+    console.log('监控仪表盘: http://localhost:' + SERVER_PORT + '/agent-dashboard.html');
+    console.log('交互式记忆: GET /memory?scope=global 或 ?scope=agent:<id>');
+    // HTTP 服务已独立，启动后台轮询（每次开独立进程，永不阻塞主 HTTP）
+    pollLoop();
+  });
+}
+
+function pollLoop() {
+  // 主进程直接运行 updateStatus()（异步，不阻塞事件循环）
+  // openclaw status --json 使用 spawn+SIGKILL 超时（120s），不会永久挂起
+  const doUpdate = () => {
+    updateStatus().then(() => {
+      // 成功
+    }).catch((e) => {
+      console.warn('[writer] updateStatus 失败:', e && e.message ? e.message : e);
+    });
+  };
+  doUpdate();
+  setInterval(doUpdate, CHECK_INTERVAL_MS);
 }
 // 不再定时拉取记忆，仅在用户点击仪表盘「记忆」时通过 GET /memory?scope= 按需调用向量库
