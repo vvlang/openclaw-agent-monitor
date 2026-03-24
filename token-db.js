@@ -277,9 +277,8 @@ function getCallStatsByHourWindow(limitDays, windowHours = 5) {
 
   const result = {};
   rows.forEach(({ recorded_at, calls }) => {
-    const dt = new Date(recorded_at);
-    const date = dt.toISOString().slice(0, 10);
-    const hour = dt.getHours();
+    const date = recorded_at.slice(0, 10); // ISO: "2026-03-24T14:06:03.828Z" -> "2026-03-24"
+    const hour = parseInt(recorded_at.slice(11, 13), 10); // hour from position 11-13
     const windowStart = Math.floor(hour / windowHours) * windowHours;
     const windowEnd = windowStart + windowHours;
     const key = `${date}-${windowStart}`;

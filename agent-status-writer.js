@@ -13,6 +13,20 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const url = require('url');
+
+/** 从原始字符串中提取第一个完整 JSON 对象（按大括号深度） */
+function extractJsonObject(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const start = raw.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0, end = -1;
+  for (let i = start; i < raw.length; i++) {
+    if (raw[i] === '{') depth++;
+    else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end === -1) return null;
+  try { return JSON.parse(raw.slice(start, end + 1)); } catch (_) { return null; }
+}
 const tokenDb = require('./token-db');
 
 /** Gateway 直连探测超时（毫秒），当 status 报离线时用此探测修正 */
@@ -25,6 +39,17 @@ const OUTPUT_FILE = path.join(__dirname, 'agent-status.json');
 
 /** OpenClaw 配置目录：本程序仅读取（openclaw.json/clawdbot.json），绝不写入 */
 const OPENCLAW_CONFIG_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), '.openclaw');
+
+/** 判断路径是否在 OPENCLAW_DIR 下（用于插件路径重写） */
+function isUnderOpenClawDir(p) {
+  try {
+    const abs = path.resolve(String(p));
+    const root = path.resolve(OPENCLAW_DIR);
+    return abs === root || abs.startsWith(root + path.sep);
+  } catch (_) {
+    return false;
+  }
+}
 
 /** 写入前必须调用：若 filePath 在 ~/.openclaw 下则抛错，保证配置目录只读 */
 function ensureNotOpenClawConfigPath(filePath) {
@@ -214,31 +239,13 @@ function getGatewayReachableViaHealthImpl() {
       resolve({ reachable: false, healthJson: null });
     }, timeoutMs);
     function tryParse() {
-      const start = raw.indexOf('{');
-      if (start === -1) return;
-      let depth = 0;
-      let end = -1;
-      for (let i = start; i < raw.length; i++) {
-        if (raw[i] === '{') depth++;
-        if (raw[i] === '}') {
-          depth--;
-          if (depth === 0) {
-            end = i;
-            break;
-          }
-        }
-      }
-      if (end === -1) return;
-      try {
-        const healthJson = JSON.parse(raw.slice(start, end + 1));
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(timer);
-        try {
-          child.kill('SIGKILL');
-        } catch (_) {}
-        resolve({ reachable: true, healthJson });
-      } catch (_) {}
+      const json = extractJsonObject(raw);
+      if (!json) return;
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      resolve({ reachable: true, healthJson: json });
     }
     child.stdout.on('data', (chunk) => {
       raw += chunk.toString('utf-8');
@@ -317,25 +324,13 @@ function getHealthJsonImpl() {
       done(null);
     }, HEALTH_CMD_TIMEOUT_MS);
     function tryParse() {
-      const start = raw.indexOf('{');
-      if (start === -1) return;
-      let depth = 0;
-      let end = -1;
-      for (let i = start; i < raw.length; i++) {
-        if (raw[i] === '{') depth++;
-        if (raw[i] === '}') {
-          depth--;
-          if (depth === 0) { end = i; break; }
-        }
-      }
-      if (end === -1) return;
-      try {
-        const data = JSON.parse(raw.slice(start, end + 1));
-        if (resolved) return;
-        clearTimeout(timer);
-        try { child.kill('SIGKILL'); } catch (_) {}
-        done(data);
-      } catch (_) {}
+      const json = extractJsonObject(raw);
+      if (!json) return;
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      done(json);
     }
     child.stdout.on('data', (chunk) => {
       raw += chunk.toString('utf-8');
@@ -386,25 +381,13 @@ function getModelsStatusJsonImpl() {
       done(null);
     }, timeoutMs);
     function tryParse() {
-      const start = raw.indexOf('{');
-      if (start === -1) return;
-      let depth = 0;
-      let end = -1;
-      for (let i = start; i < raw.length; i++) {
-        if (raw[i] === '{') depth++;
-        if (raw[i] === '}') {
-          depth--;
-          if (depth === 0) { end = i; break; }
-        }
-      }
-      if (end === -1) return;
-      try {
-        const data = JSON.parse(raw.slice(start, end + 1));
-        if (resolved) return;
-        clearTimeout(timer);
-        try { child.kill('SIGKILL'); } catch (_) {}
-        done(data);
-      } catch (_) {}
+      const json = extractJsonObject(raw);
+      if (!json) return;
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      done(json);
     }
     child.stdout.on('data', (chunk) => {
       raw += chunk.toString('utf-8');
@@ -567,15 +550,6 @@ function createIsolatedOpenClawEnv() {
     // 将 plugins.load.paths / installs 中指向 ~/.openclaw 的扩展目录复制到临时目录，并重写路径
     // 这样 openclaw health/models 在隔离目录执行时仍能加载通道插件（如 dingtalk）。
     const rewrites = new Map(); // srcAbs -> dstAbs
-    function isUnderOpenClawDir(p) {
-      try {
-        const abs = path.resolve(String(p));
-        const root = path.resolve(OPENCLAW_DIR);
-        return abs === root || abs.startsWith(root + path.sep);
-      } catch (_) {
-        return false;
-      }
-    }
     function rewritePathIfNeeded(p) {
       if (!p || typeof p !== 'string') return p;
       if (!isUnderOpenClawDir(p)) return p;
@@ -776,25 +750,13 @@ function runOpenClawJsonCommandImpl(args) {
       done(null);
     }, timeoutMs);
     function tryParse() {
-      const start = raw.indexOf('{');
-      if (start === -1) return;
-      let depth = 0;
-      let end = -1;
-      for (let i = start; i < raw.length; i++) {
-        if (raw[i] === '{') depth++;
-        if (raw[i] === '}') {
-          depth--;
-          if (depth === 0) { end = i; break; }
-        }
-      }
-      if (end === -1) return;
-      try {
-        const data = JSON.parse(raw.slice(start, end + 1));
-        if (resolved) return;
-        clearTimeout(timer);
-        try { child.kill('SIGKILL'); } catch (_) {}
-        done(data);
-      } catch (_) {}
+      const json = extractJsonObject(raw);
+      if (!json) return;
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { child.kill('SIGKILL'); } catch (_) {}
+      done(json);
     }
     child.stdout.on('data', (chunk) => {
       raw += chunk.toString('utf-8');
@@ -1485,7 +1447,8 @@ async function updateStatus() {
   function pickVersion(gw) {
     if (!gw || typeof gw !== 'object') return null;
     const v = (gw.self && gw.self.version) || gw.version || (gw.self && gw.self.nodeVersion);
-    return v != null && String(v).trim() !== '' ? String(v).trim() : null;
+    const s = v != null ? String(v).trim() : '';
+    return s !== '' ? s : null;
   }
   let gateway = status.gateway
     ? {

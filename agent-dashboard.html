@@ -666,9 +666,9 @@
 
         function escapeHtml(s) {
             if (s == null) return '';
-            var div = document.createElement('div');
-            div.textContent = s;
-            return div.innerHTML;
+            if (!escapeHtml._div) escapeHtml._div = document.createElement('div');
+            escapeHtml._div.textContent = s;
+            return escapeHtml._div.innerHTML;
         }
 
         function formatMemoryTime(ts) {
