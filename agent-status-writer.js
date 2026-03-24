@@ -1705,6 +1705,7 @@ function serveMemoryApi(req, res) {
 
 function serveStatic(req, res) {
   const parsed = url.parse(req.url, true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
   let filePath = parsed.pathname === '/' || parsed.pathname === '' ? '/agent-dashboard.html' : parsed.pathname;
   if (filePath === '/agent-status.json') {
     try {
