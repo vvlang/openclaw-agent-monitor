@@ -1,7 +1,8 @@
 {
   "name": "openclaw-agent-monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenClaw 全量 Agent 状态与会话内容可视化监控",
+  "copyright": "AIYeon",
   "main": "agent-status-writer.js",
   "scripts": {
     "writer": "node agent-status-writer.js",
