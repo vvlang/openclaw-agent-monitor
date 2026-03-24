@@ -7,7 +7,7 @@
 
 ## 功能特性
 
-- **全量 Agent 监控**：自动发现 `openclaw.json` 中配置的全部 Agent，无需写死列表；每个 Agent 显示状态（空闲/工作中）、会话数、上下文占用、最近活动时间。
+- **全量 Agent 监控**：自动发现 `openclaw.json` 中配置的全部 Agent，无需写死列表；每个 Agent 显示状态（空闲/工作中）、会话数、上下文占用、最近活动时间，**支持 Subagent（临时分身）计数**。
 - **Gateway 与通道**：展示网关是否在线、延迟、版本、主机名；通道配置摘要（如 Telegram、iMessage）。
 - **系统信息**：顶部状态栏显示本机 CPU、内存、磁盘使用率，本机 IP，外网连通状态（ping 8.8.8.8）。
 - **Token 统计**：总会话数、当前合计（各 Agent 最近会话 Token 之和）、**累计**（自 writer 启动以来按会话增量累加，持久化于 `token-cumulative-state.json`）；按 Agent 表格含「当前」与「累计」列；按供应商·模型分组展示（含 SQLite 数据库累计）。
@@ -28,7 +28,7 @@
 │  openclaw status --json    会话 .jsonl    openclaw.json          │
 │  + 本机系统信息    + openclaw memory-pro list（按需）             │
 └───────────────────────┬────────────────────────────────────────┘
-                         │ 每 5 秒轮询 / 按会话读取 / 按需记忆
+                         │ 每 30 秒轮询 / 按会话读取 / 按需记忆
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  agent-status-writer.js（Node，单进程）                           │
@@ -45,7 +45,7 @@
 ```
 
 - **数据与 API**：`agent-status.json` 由 writer 生成（不提交 Git）；成本配置存 `model-pricing.json`（可选）；Token 累计状态存 `token-cumulative-state.json`（不提交）；`token-usage.db` 为 SQLite 数据库记录每次 token 增量与调用次数（不提交）；`/call-stats` API 返回按供应商·模型的调用次数与每5小时窗口统计。
-- **运行环境**：writer 需在已安装 OpenClaw 的机器上运行；`openclaw status --json` 使用 spawn + 流式读取，读到完整 JSON 后立即结束子进程，兼容安装插件（如 openclaw-self-healing）后 CLI 不退出的情况。status/health/models/plugins 等 CLI 调用经全局串行队列执行，同一时刻仅一个 openclaw 子进程，避免进程堆积。仪表盘通过 writer 提供的 HTTP 同源访问。
+- **运行环境**：writer 需在已安装 OpenClaw 的机器上运行；`openclaw status --json` 使用 spawn + 流式读取，读到完整 JSON 后立即结束子进程，兼容安装插件（如 openclaw-self-healing）后 CLI 不退出的情况。status/health/models/plugins 等 CLI 调用经全局串行队列执行，同一时刻仅一个 openclaw 子进程，避免进程堆积。角色记忆为按需拉取（点击仪表盘「记忆」按钮时请求），不阻塞页面。仪表盘通过 writer 提供的 HTTP 同源访问。
 
 ---
 
@@ -95,7 +95,7 @@ cd openclaw-agent-monitor
 node agent-status-writer.js
 ```
 
-`start.sh` 会设置 `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`（若本机通过环境变量或 `~/.openclaw/.env` 配置了 `OPENCLAW_GATEWAY_URL`，openclaw CLI 可能报 SECURITY ERROR，该变量可避免），然后每 5 秒轮询 `openclaw status --json` 并更新 `agent-status.json`，同时启动 HTTP 服务（默认端口 3880）。浏览器访问：**http://localhost:3880/agent-dashboard.html** 即可打开仪表盘，无需单独运行 `serve`。
+`start.sh` 会设置 `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`（若本机通过环境变量或 `~/.openclaw/.env` 配置了 `OPENCLAW_GATEWAY_URL`，openclaw CLI 可能报 SECURITY ERROR，该变量可避免），然后每 30 秒轮询 `openclaw status --json` 并更新 `agent-status.json`，同时启动 HTTP 服务（默认端口 3880）。浏览器访问：**http://localhost:3880/agent-dashboard.html** 即可打开仪表盘，无需单独运行 `serve`。
 
 ### 3. 后台常驻（可选）
 
@@ -108,7 +108,7 @@ node agent-status-writer.js
 - **顶部左侧**：标题与副标题。
 - **顶部右侧**：系统信息（CPU / 内存 / 磁盘 使用率、本机 IP、网络在线/离线）→ Gateway 状态徽章 → Agent 数量与数据更新时间。
 - **Gateway 行**：网关版本、延迟、主机名；通道摘要（如 Telegram、iMessage）。
-- **Agent 卡片**：每个 Agent 一块卡片，含状态灯（绿=空闲，蓝=工作中）、名称、ID、会话数、上下文占用、简短状态文案、**「读取记忆」按钮**（点击后拉取该角色 memory-pro 记忆并展示）。
+- **Agent 卡片**：每个 Agent 一块卡片，含状态灯（绿=空闲，蓝=工作中）、名称、ID、会话数、上下文占用、简短状态文案、**分身计数徽章**（如「🌀 3 分身」）、**「读取记忆」按钮**（点击后拉取该角色 memory-pro 记忆并展示）。
 - **Token 统计**：总会话数、当前合计、累计（持久化累计）；按 Agent 表格展示「当前」会话 Token、「累计」Token 与上下文%。最近会话表格支持 Token 列。
 - **API 调用次数**：按供应商·模型分组展示调用次数；每 5 小时窗口展示当日调用分布。
 - **状态变化日志**：Agent 状态变化时追加一条带时间戳的日志；支持「清空」。
@@ -126,15 +126,12 @@ node agent-status-writer.js
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| `OPENCLAW_MONITOR_INTERVAL_MS` | 3000 | 轮询间隔（毫秒）。writer 会先写 Agent/Gateway/会话等再补全通道与插件，仪表盘可更快看到更新。 |
+| `OPENCLAW_MONITOR_INTERVAL_MS` | 30000 | 轮询间隔（毫秒），默认 30 秒。writer 会先写 Agent/Gateway/会话等再补全通道与插件，仪表盘可更快看到更新。 |
 | `OPENCLAW_MONITOR_TIMEOUT_MS` | 5000 | `openclaw status` 及系统采集命令的超时（毫秒），慢网络可适当调大。 |
 | `OPENCLAW_MONITOR_REDACT_PATHS` | 未设置 | 设为 `1` 时不在 JSON 中输出本机路径（`workspaceDir`、gateway `url`/`host`/`ip` 等），降低泄露风险。 |
 | `OPENCLAW_MONITOR_NO_CONTENT_PREVIEW` | 未设置 | 设为 `1` 时不写入 `recentSessions[].contentPreview`，避免对话文本进入同步文件。 |
-| `OPENCLAW_MONITOR_NO_MEMORY` | 未设置 | 设为 `1` 时不拉取角色记忆（`openclaw memory-pro list`），不写入 `memoryGlobal` 与 `agents[].memoryEntries`。 |
+| `OPENCLAW_MONITOR_NO_MEMORY` | 未设置 | 设为 `1` 时禁用角色记忆功能（不提供 `/memory` API）。 |
 | `OPENCLAW_MONITOR_MEMORY_LIMIT` | 30 | 每个 scope（global、agent:&lt;id&gt;）最多拉取的记忆条数（5–100）。 |
-| `OPENCLAW_MONITOR_MEMORY_INTERVAL_MS` | 30000 | 角色记忆**单独**轮询间隔（毫秒）。记忆使用异步拉取、不与 5s 状态轮询同频，避免 agent 运行时阻塞页面。 |
-| `OPENCLAW_MONITOR_MEMORY_CONCURRENCY` | 2 | 同时拉取记忆的 scope 数量上限（1–10）。Agent 多时若曾出现 openclaw 进程爆炸，可保持 2 或调小。 |
-| `OPENCLAW_MONITOR_MEMORY_CACHE_TTL_MS` | 20000 | 仪表盘 GET /memory 响应缓存时间（毫秒），重复点击「读取记忆」时命中缓存不重复起进程。 |
 | `OPENCLAW_MONITOR_MEMORY_DEBUG` | 未设置 | 设为 `1` 时在终端输出记忆解析调试日志。 |
 | `OPENCLAW_MONITOR_PORT` | 3880 | writer 内置 HTTP 服务端口。 |
 | `OPENCLAW_DIR` | `~/.openclaw` | OpenClaw 配置目录，用于读取 `openclaw.json`（成本设置模型 ID、可选）。 |
