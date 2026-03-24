@@ -1098,70 +1098,57 @@ async function getSystemInfo() {
 }
 
 /**
- * 拉取 openclaw status --json。使用 spawn + 流式读取，读到完整 JSON 后立即 kill 子进程，
- * 避免在安装插件后 CLI 加载插件导致进程不退出。
- * 使用 SIGKILL 超时，比 execFile 的 timeout 选项更可靠。
+ * 拉取 openclaw status --json。使用 bash -c 重定向到临时文件，
+ * 避免 Node.js pipe buffer 死锁问题。
  * 注意：此处必须使用真实 OPENCLAW_DIR（需读 agents/sessions）。
  */
 function getStatusJsonImpl() {
   return new Promise((resolve) => {
-    // 增加超时到 120s，避免插件多时不够用
     const timeoutMs = Math.max(120000, COMMAND_TIMEOUT_MS);
     let resolved = false;
-    let raw = '';
-    const child = spawn('openclaw', ['status', '--json'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      env: process.env,
-    });
+    const tmpFile = '/tmp/openclaw_status_' + process.pid + '.json';
+
     const timer = setTimeout(() => {
       if (resolved) return;
       resolved = true;
-      try { child.kill('SIGKILL'); } catch (_) {}
+      try { fs.unlinkSync(tmpFile); } catch (_) {}
       console.warn('[writer] getStatusJson: 超时', timeoutMs, 'ms');
       resolve(null);
     }, timeoutMs);
-    child.stdout.on('data', (chunk) => {
-      raw += chunk.toString('utf-8');
-      if (raw.length > 10 * 1024 * 1024) raw = raw.slice(-5 * 1024 * 1024);
-      // 流式解析：边收数据边找完整 JSON
-      if (resolved) return;
-      const start = raw.indexOf('{');
-      if (start === -1) return;
-      let depth = 0, end = -1;
-      for (let i = start; i < raw.length; i++) {
-        if (raw[i] === '{') depth++;
-        else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-      }
-      if (end === -1) return;
-      try {
-        const data = JSON.parse(raw.slice(start, end + 1));
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(timer);
-        try { child.kill('SIGKILL'); } catch (_) {}
-        resolve(data);
-      } catch (_) {}
-    });
-    child.stderr.on('data', (chunk) => {
-      // 忽略插件日志
+
+    const child = spawn('bash', ['-c', 'openclaw status --json > "' + tmpFile + '" 2>/dev/null'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      env: process.env,
     });
     child.on('error', (err) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
-      console.warn('[writer] getStatusJson spawn error:', err.message || err);
+      try { fs.unlinkSync(tmpFile); } catch (_) {}
+      console.warn('[writer] getStatusJson bash error:', err.message || err);
       resolve(null);
     });
     child.on('close', (code) => {
       if (resolved) return;
-      // 子进程退出但还没解析出完整 JSON
-      resolved = true;
+      // bash 退出后，文件应该已写完（stdout 被 bash 重定向到文件）
       clearTimeout(timer);
-      if (code !== 0) {
-        console.warn('[writer] getStatusJson: 子进程退出码', code);
+      try {
+        const content = fs.readFileSync(tmpFile, 'utf-8');
+        fs.unlinkSync(tmpFile);
+        const start = content.indexOf('{');
+        if (start === -1) { resolve(null); return; }
+        let depth = 0, end = -1;
+        for (let i = start; i < content.length; i++) {
+          if (content[i] === '{') depth++;
+          else if (content[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+        }
+        if (end === -1) { resolve(null); return; }
+        resolve(JSON.parse(content.slice(start, end + 1)));
+      } catch (e) {
+        try { fs.unlinkSync(tmpFile); } catch (_) {}
+        resolve(null);
       }
-      resolve(null);
     });
   });
 }
@@ -1953,10 +1940,15 @@ if (process.argv.includes('--one-shot')) {
 function pollLoop() {
   // 主进程直接运行 updateStatus()（异步，不阻塞事件循环）
   // openclaw status --json 使用 spawn+SIGKILL 超时（120s），不会永久挂起
+  // 加锁：上一次 updateStatus 完成后才开始下一次，避免超时堆叠
+  let updateInProgress = false;
   const doUpdate = () => {
+    if (updateInProgress) return;
+    updateInProgress = true;
     updateStatus().then(() => {
-      // 成功
+      updateInProgress = false;
     }).catch((e) => {
+      updateInProgress = false;
       console.warn('[writer] updateStatus 失败:', e && e.message ? e.message : e);
     });
   };
