@@ -221,55 +221,10 @@ function probeGatewayUrl(gatewayUrl) {
  * @returns {Promise<{ reachable: boolean, healthJson: object|null }>}
  */
 function getGatewayReachableViaHealthImpl() {
-  return new Promise((resolve) => {
-    const timeoutMs = Math.min(20000, Math.max(5000, GATEWAY_PROBE_TIMEOUT_MS * 2));
-    let raw = '';
-    let resolved = false;
-    const child = spawn('openclaw', ['health', '--json'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      env: process.env,
-    });
-    const timer = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      try {
-        child.kill('SIGKILL');
-      } catch (_) {}
-      resolve({ reachable: false, healthJson: null });
-    }, timeoutMs);
-    function tryParse() {
-      const json = extractJsonObject(raw);
-      if (!json) return;
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      try { child.kill('SIGKILL'); } catch (_) {}
-      resolve({ reachable: true, healthJson: json });
-    }
-    child.stdout.on('data', (chunk) => {
-      raw += chunk.toString('utf-8');
-      if (raw.length > 512 * 1024) raw = raw.slice(-256 * 1024);
-      tryParse();
-    });
-    child.stderr.on('data', () => {});
-    child.on('error', () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve({ reachable: false, healthJson: null });
-      }
-    });
-    child.on('close', () => {
-      if (resolved) return;
-      tryParse();
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve({ reachable: false, healthJson: null });
-      }
-    });
-  });
+  const timeoutMs = Math.min(20000, Math.max(5000, GATEWAY_PROBE_TIMEOUT_MS * 2));
+  return spawnOpenClawJson(['health', '--json'], timeoutMs, { useTmpDir: false, queue: false })
+    .then((json) => ({ reachable: json !== null, healthJson: json }))
+    .catch(() => ({ reachable: false, healthJson: null }));
 }
 function getGatewayReachableViaHealth() {
   return withOpenClawQueue(getGatewayReachableViaHealthImpl);
@@ -296,55 +251,7 @@ function getOpenClawVersionFromCli() {
 /** 拉取 openclaw health --json，用于通道/聊天工具健康。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
 const HEALTH_CMD_TIMEOUT_MS = 12000;
 function getHealthJsonImpl() {
-  let tmpDir;
-  let env;
-  try {
-    const isolated = createIsolatedOpenClawEnv();
-    tmpDir = isolated.tmpDir;
-    env = isolated.env;
-  } catch (_) {
-    return Promise.resolve(null);
-  }
-  return new Promise((resolve) => {
-    let raw = '';
-    let resolved = false;
-    const done = (result) => {
-      if (resolved) return;
-      resolved = true;
-      cleanupTmpDir(tmpDir);
-      resolve(result);
-    };
-    const child = spawn('openclaw', ['health', '--json'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      env,
-    });
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch (_) {}
-      done(null);
-    }, HEALTH_CMD_TIMEOUT_MS);
-    function tryParse() {
-      const json = extractJsonObject(raw);
-      if (!json) return;
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      try { child.kill('SIGKILL'); } catch (_) {}
-      done(json);
-    }
-    child.stdout.on('data', (chunk) => {
-      raw += chunk.toString('utf-8');
-      if (raw.length > 512 * 1024) raw = raw.slice(-256 * 1024);
-      tryParse();
-    });
-    child.stderr.on('data', () => {});
-    child.on('error', () => { done(null); });
-    child.on('close', () => {
-      if (resolved) return;
-      tryParse();
-      if (!resolved) done(null);
-    });
-  });
+  return spawnOpenClawJson(['health', '--json'], HEALTH_CMD_TIMEOUT_MS, { useTmpDir: true, queue: false });
 }
 function getHealthJson() {
   return withOpenClawQueue(getHealthJsonImpl);
@@ -352,56 +259,7 @@ function getHealthJson() {
 
 /** 拉取 openclaw models status --json，用于模型健康。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
 function getModelsStatusJsonImpl() {
-  let tmpDir;
-  let env;
-  try {
-    const isolated = createIsolatedOpenClawEnv();
-    tmpDir = isolated.tmpDir;
-    env = isolated.env;
-  } catch (_) {
-    return Promise.resolve(null);
-  }
-  return new Promise((resolve) => {
-    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 10000);
-    let raw = '';
-    let resolved = false;
-    const done = (result) => {
-      if (resolved) return;
-      resolved = true;
-      cleanupTmpDir(tmpDir);
-      resolve(result);
-    };
-    const child = spawn('openclaw', ['models', 'status', '--json'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      env,
-    });
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch (_) {}
-      done(null);
-    }, timeoutMs);
-    function tryParse() {
-      const json = extractJsonObject(raw);
-      if (!json) return;
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      try { child.kill('SIGKILL'); } catch (_) {}
-      done(json);
-    }
-    child.stdout.on('data', (chunk) => {
-      raw += chunk.toString('utf-8');
-      if (raw.length > 512 * 1024) raw = raw.slice(-256 * 1024);
-      tryParse();
-    });
-    child.stderr.on('data', () => {});
-    child.on('error', () => { done(null); });
-    child.on('close', () => {
-      if (resolved) return;
-      tryParse();
-      if (!resolved) done(null);
-    });
-  });
+  return spawnOpenClawJson(['models', 'status', '--json'], Math.max(COMMAND_TIMEOUT_MS, 10000), { useTmpDir: true, queue: false });
 }
 function getModelsStatusJson() {
   return withOpenClawQueue(getModelsStatusJsonImpl);
@@ -544,41 +402,8 @@ function createIsolatedOpenClawEnv() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-'));
   try {
     const baseConfig = getCachedOpenClawConfig();
-    // 深拷贝，避免改写全局缓存对象
     const config = JSON.parse(JSON.stringify(baseConfig || {}));
-
-    // 将 plugins.load.paths / installs 中指向 ~/.openclaw 的扩展目录复制到临时目录，并重写路径
-    // 这样 openclaw health/models 在隔离目录执行时仍能加载通道插件（如 dingtalk）。
-    const rewrites = new Map(); // srcAbs -> dstAbs
-    function rewritePathIfNeeded(p) {
-      if (!p || typeof p !== 'string') return p;
-      if (!isUnderOpenClawDir(p)) return p;
-      const abs = path.resolve(p);
-      if (rewrites.has(abs)) return rewrites.get(abs);
-      const rel = path.relative(OPENCLAW_DIR, abs);
-      const dst = path.join(tmpDir, rel);
-      rewrites.set(abs, dst);
-      try {
-        fs.mkdirSync(path.dirname(dst), { recursive: true });
-        // 仅复制目录/文件本身；失败则忽略，交给 openclaw 自行报错
-        fs.cpSync(abs, dst, { recursive: true });
-      } catch (_) {}
-      return dst;
-    }
-    // plugins.load.paths
-    if (config.plugins && config.plugins.load && Array.isArray(config.plugins.load.paths)) {
-      config.plugins.load.paths = config.plugins.load.paths.map(rewritePathIfNeeded);
-    }
-    // plugins.installs.*.installPath/sourcePath
-    if (config.plugins && config.plugins.installs && typeof config.plugins.installs === 'object') {
-      for (const k of Object.keys(config.plugins.installs)) {
-        const inst = config.plugins.installs[k];
-        if (!inst || typeof inst !== 'object') continue;
-        if (inst.installPath) inst.installPath = rewritePathIfNeeded(inst.installPath);
-        if (inst.sourcePath) inst.sourcePath = rewritePathIfNeeded(inst.sourcePath);
-      }
-    }
-
+    // 只写配置文件，不复制插件目录（插件使用绝对路径，复制大目录会阻塞）
     fs.writeFileSync(path.join(tmpDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf-8');
     return { env: { ...process.env, OPENCLAW_DIR: tmpDir }, tmpDir };
   } catch (e) {
@@ -721,56 +546,7 @@ function getDefaultModelFromConfig() {
 
 /** 运行 openclaw <args> 并从 stdout 解析 JSON。在隔离临时目录下执行，避免子进程在 ~/.openclaw 写临时文件。 */
 function runOpenClawJsonCommandImpl(args) {
-  let tmpDir;
-  let env;
-  try {
-    const isolated = createIsolatedOpenClawEnv();
-    tmpDir = isolated.tmpDir;
-    env = isolated.env;
-  } catch (_) {
-    return Promise.resolve(null);
-  }
-  return new Promise((resolve) => {
-    const timeoutMs = Math.max(COMMAND_TIMEOUT_MS, 20000);
-    let raw = '';
-    let resolved = false;
-    const done = (result) => {
-      if (resolved) return;
-      resolved = true;
-      cleanupTmpDir(tmpDir);
-      resolve(result);
-    };
-    const child = spawn('openclaw', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false,
-      env,
-    });
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch (_) {}
-      done(null);
-    }, timeoutMs);
-    function tryParse() {
-      const json = extractJsonObject(raw);
-      if (!json) return;
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      try { child.kill('SIGKILL'); } catch (_) {}
-      done(json);
-    }
-    child.stdout.on('data', (chunk) => {
-      raw += chunk.toString('utf-8');
-      if (raw.length > 1024 * 1024) raw = raw.slice(-512 * 1024);
-      tryParse();
-    });
-    child.stderr.on('data', () => {});
-    child.on('error', () => { done(null); });
-    child.on('close', () => {
-      if (resolved) return;
-      tryParse();
-      if (!resolved) done(null);
-    });
-  });
+  return spawnOpenClawJson(args, Math.max(COMMAND_TIMEOUT_MS, 20000), { useTmpDir: true, queue: false, maxBuffer: 1024 * 1024 });
 }
 function runOpenClawJsonCommand(args) {
   return withOpenClawQueue(() => runOpenClawJsonCommandImpl(args));
@@ -841,7 +617,7 @@ const DEFAULT_COST_CONFIG = {
 const CHECK_INTERVAL_MS = parseInt(process.env.OPENCLAW_MONITOR_INTERVAL_MS || '30000', 10) || 30000;
 /** openclaw CLI 命令超时（毫秒）。慢环境或 Agent 多时可设 OPENCLAW_MONITOR_TIMEOUT_MS=60000 等 */
 const COMMAND_TIMEOUT_MS = Math.max(30000, parseInt(process.env.OPENCLAW_MONITOR_TIMEOUT_MS || '30000', 10) || 30000);
-const ACTIVE_AGE_MS = 120000; // 2 分钟内有活动视为 thinking
+const ACTIVE_AGE_MS = 600000; // 10 分钟内有活动视为 thinking（使用 session age 判断）
 const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
 const PREVIEW_TEXT_LEN = 120; // 每条消息预览最大字符
@@ -855,7 +631,13 @@ const MEMORY_CONCURRENCY = Math.min(5, Math.max(1, parseInt(process.env.OPENCLAW
 const MEMORY_TEXT_LEN = 200; // 每条记忆预览最大字符，超出截断
 
 // memory 命令超时（毫秒），多 Agent 或慢环境可调大；默认 30s
-const MEMORY_COMMAND_TIMEOUT_MS = Math.max(10000, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_TIMEOUT_MS || '30000', 10) || 30000);const COLOR_PALETTE = [
+const MEMORY_COMMAND_TIMEOUT_MS = Math.max(10000, parseInt(process.env.OPENCLAW_MONITOR_MEMORY_TIMEOUT_MS || '30000', 10) || 30000);
+const MEMORY_JSON_MAX_LENGTH = 1024 * 1024; // 1MB，防止 memory 命令输出过大导致内存问题
+const MEMORY_JSON_MAX_DEPTH = 10; // 防止嵌套过深的 JSON 导致栈溢出
+const MEMORY_SCOPE_MAX_LENGTH = 200; // 防止 scope 参数过长
+const MEMORY_DEBUG = process.env.OPENCLAW_MONITOR_MEMORY_DEBUG === '1'; // 调试开关
+
+const COLOR_PALETTE = [
   'bg-violet-500',
   'bg-blue-500',
   'bg-emerald-500',
@@ -978,6 +760,70 @@ function execAsync(cmd, args, timeoutMs) {
   });
 }
 
+/**
+ * 通用的 spawn + JSON 解析模式，避免重复代码。
+ * @param {string[]} args - openclaw 命令参数
+ * @param {number} timeoutMs - 超时毫秒
+ * @param {object} opts - 选项 { useTmpDir: bool, queue: bool }
+ * @returns {Promise<object|null>}
+ */
+function spawnOpenClawJson(args, timeoutMs, opts = {}) {
+  const { useTmpDir = false, queue = true, maxBuffer = 512 * 1024 } = opts;
+  const impl = () => {
+    let tmpDir, env;
+    try {
+      if (useTmpDir) {
+        const isolated = createIsolatedOpenClawEnv();
+        tmpDir = isolated.tmpDir;
+        env = isolated.env;
+      }
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      let raw = '';
+      let resolved = false;
+      const cleanup = () => { if (tmpDir) cleanupTmpDir(tmpDir); };
+      const done = (result) => {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(result);
+      };
+      const child = spawn('openclaw', args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: false,
+        env: env || process.env,
+      });
+      const timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch (_) {}
+        done(null);
+      }, timeoutMs);
+      const tryParse = () => {
+        const json = extractJsonObject(raw);
+        if (!json) return;
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try { child.kill('SIGKILL'); } catch (_) {}
+        done(json);
+      };
+      child.stdout.on('data', (chunk) => {
+        raw += chunk.toString('utf-8');
+        if (raw.length > maxBuffer) raw = raw.slice(-Math.floor(maxBuffer / 2));
+        tryParse();
+      });
+      child.stderr.on('data', () => {});
+      child.on('error', () => done(null));
+      child.on('close', () => {
+        if (!resolved) tryParse();
+        if (!resolved) done(null);
+      });
+    });
+  };
+  return queue ? withOpenClawQueue(impl) : impl();
+}
+
 /** 采集本机系统信息：CPU、内存、磁盘、IP、网络（全部异步，无 execSync 阻塞） */
 async function getSystemInfo() {
   const info = {
@@ -1045,9 +891,12 @@ async function getSystemInfo() {
   }
   try {
     if (info.ip) {
-      // ⚠️ 硬编码命令，切勿从环境变量或外部输入构建命令以防止命令注入
-      const pingCmd = os.platform() === 'darwin' ? '/sbin/ping -c 1 -t 2 8.8.8.8 2>/dev/null' : 'ping -c 1 -W 2 8.8.8.8 2>/dev/null';
-      await execAsync('/sbin/ping', ['-c', '1', '-t', '2', '8.8.8.8'], COMMAND_TIMEOUT_MS);
+      // 根据平台选择正确的 ping 命令
+      const pingArgs = os.platform() === 'darwin'
+        ? ['-c', '1', '-t', '2', '8.8.8.8']
+        : ['-c', '1', '-W', '2', '8.8.8.8'];
+      const pingCmd = os.platform() === 'darwin' ? '/sbin/ping' : 'ping';
+      await execAsync(pingCmd, pingArgs, COMMAND_TIMEOUT_MS);
       info.network = '在线';
     } else {
       info.network = '无外网 IP';
@@ -1098,15 +947,8 @@ function getStatusJsonImpl() {
       try {
         const content = fs.readFileSync(tmpFile, 'utf-8');
         fs.unlinkSync(tmpFile);
-        const start = content.indexOf('{');
-        if (start === -1) { resolve(null); return; }
-        let depth = 0, end = -1;
-        for (let i = start; i < content.length; i++) {
-          if (content[i] === '{') depth++;
-          else if (content[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-        }
-        if (end === -1) { resolve(null); return; }
-        resolve(JSON.parse(content.slice(start, end + 1)));
+        const json = extractJsonObject(content);
+        resolve(json);
       } catch (e) {
         try { fs.unlinkSync(tmpFile); } catch (_) {}
         resolve(null);
@@ -1165,31 +1007,63 @@ function getJsonSliceMaxDepth(slice) {
   return maxDepth;
 }
 
+/**
+ * 去除 ANSI 颜色码
+ */
+function stripAnsiCodes(str) {
+  return str.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+/**
+ * 从 memory-pro 命令输出中提取 JSON 数组
+ */
 function parseMemoryListOutput(raw, scopeForLog) {
-  const lineStart = raw.indexOf('\n[');
-  const start = lineStart >= 0 ? lineStart + 1 : raw.indexOf('[');
-  if (start === -1) {
-    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'rawLen=', raw.length, 'no [ found, head=', raw.slice(0, 120));
+  // 去除 ANSI 颜色码
+  const clean = stripAnsiCodes(raw);
+  // 查找包含 "id" 字段的位置 - 这表示真正的 JSON 数据开始
+  const idIdx = clean.indexOf('"id"');
+  if (idIdx === -1) {
+    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'no "id" found');
     return [];
   }
-  const end = raw.lastIndexOf(']');
-  if (end === -1 || end < start) {
-    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'start=', start, 'end=', end, 'rawLen=', raw.length);
+  // 从 idIdx 往前找 JSON 数组的 [
+  let arrayStart = -1;
+  for (let i = idIdx - 1; i >= 0; i--) {
+    if (clean[i] === '[') { arrayStart = i; break; }
+  }
+  if (arrayStart === -1) {
+    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'no [ found before "id"');
+    return [];
+  }
+  // 从 arrayStart 往后，正确处理字符串中的括号来找数组结束
+  let depth = 0;
+  let arrayEnd = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = arrayStart; i < clean.length; i++) {
+    const c = clean[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\') { escape = true; continue; }
+    if (c === '"' && !escape) { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') depth++;
+    else if (c === '[') depth++;
+    else if (c === '}') depth--;
+    else if (c === ']') { depth--; if (depth === 0) { arrayEnd = i; break; } }
+  }
+  if (arrayEnd === -1) {
+    if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'no matching ] found');
     return [];
   }
   try {
-    const slice = raw.slice(start, end + 1);
+    const slice = clean.slice(arrayStart, arrayEnd + 1);
     if (slice.length > MEMORY_JSON_MAX_LENGTH) {
       if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'slice too long', slice.length);
       return [];
     }
-    if (getJsonSliceMaxDepth(slice) > MEMORY_JSON_MAX_DEPTH) {
-      if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'max depth exceeded');
-      return [];
-    }
     const arr = JSON.parse(slice);
     if (!Array.isArray(arr)) {
-      if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'not array');
+      if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'not array, got', typeof arr);
       return [];
     }
     const out = arr.map((entry) => ({
@@ -1204,53 +1078,94 @@ function parseMemoryListOutput(raw, scopeForLog) {
     if (MEMORY_DEBUG) console.log('[writer] memory parse', scopeForLog, 'rawArrLen=', arr.length, 'afterFilter=', out.length);
     return out;
   } catch (e) {
-    if (MEMORY_DEBUG) console.warn('[writer] memory parse', scopeForLog, 'JSON error', e.message, 'sliceHead=', raw.slice(start, start + 150));
+    if (MEMORY_DEBUG) console.warn('[writer] memory parse', scopeForLog, 'JSON error', e.message);
     return [];
   }
 }
 
-/** 异步拉取某 scope 的记忆。在隔离的临时目录下执行 openclaw，避免失败时在 ~/.openclaw 生成临时文件。 */
-function getMemoryForScopeAsync(scope) {
-  let tmpDir;
+/**
+ * 读取 workspaceDir/memory/ 目录下的 .md 文件作为记忆
+ */
+function readMemoryMdFiles(workspaceDir) {
+  const memoryDir = path.join(workspaceDir, 'memory');
+  const entries = [];
   try {
-    const { env, tmpDir: dir } = createIsolatedOpenClawEnv();
-    tmpDir = dir;
-    const timeoutMs = COMMAND_TIMEOUT_MS;
-    return new Promise((resolve) => {
-      const cleanup = () => {
-        cleanupTmpDir(tmpDir);
-        tmpDir = null;
-      };
-      const timer = setTimeout(cleanup, timeoutMs + 10000);
-      exec(
-        `openclaw memory-pro list --scope "${scope}" --json --limit ${MEMORY_LIMIT} 2>/dev/null`,
-        { encoding: 'utf-8', maxBuffer: 2 * 1024 * 1024, timeout: timeoutMs, env },
-        (err, stdout) => {
-          clearTimeout(timer);
-          cleanup();
-          if (err) {
-            if (MEMORY_DEBUG) console.warn('[writer] memory', scope, 'exec err', err.message || err);
-            resolve([]);
-            return;
-          }
-          const raw = stdout || '';
-          if (MEMORY_DEBUG || raw.length < 10) console.log('[writer] memory', scope, 'stdoutLen=', raw.length, 'head=', raw.slice(0, 100));
-          const entries = parseMemoryListOutput(raw, scope);
-          if (MEMORY_DEBUG || entries.length > 0) console.log('[writer] memory', scope, '->', entries.length, '条');
-          resolve(entries);
-        }
-      );
-    });
-  } catch (e) {
-    cleanupTmpDir(tmpDir);
+    if (!fs.existsSync(memoryDir)) return entries;
+    const files = fs.readdirSync(memoryDir).filter(f => f.endsWith('.md')).sort();
+    for (const file of files) {
+      try {
+        const filePath = path.join(memoryDir, file);
+        const stat = fs.statSync(filePath);
+        const content = fs.readFileSync(filePath, 'utf-8');
+        // 取前 MEMORY_TEXT_LEN 个字符作为摘要
+        const text = content.slice(0, MEMORY_TEXT_LEN * 3).replace(/[#*`\n]/g, ' ').replace(/\s+/g, ' ').trim();
+        entries.push({
+          id: file,
+          text: text || file,
+          category: 'memory.md',
+          importance: null,
+          timestamp: stat.mtimeMs,
+        });
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return entries;
+}
+
+/** 异步拉取某 scope 的记忆。memory-pro 只读数据，不在 ~/.openclaw 写文件，无需隔离环境。 */
+function getMemoryForScopeAsync(scope, workspaceDir) {
+  // 安全校验：仅允许字母数字、下划线、点、连字符、冒号（用于 agent:<id> 格式）
+  if (!scope || typeof scope !== 'string' || !/^(global|agent:[a-zA-Z0-9_.-]+)$/.test(scope)) {
+    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] getMemoryForScopeAsync: 非法 scope 已拒绝', scope);
+    }
     return Promise.resolve([]);
   }
+  const timeoutMs = COMMAND_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    let raw = '';
+    let resolved = false;
+    const done = (entries) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(entries);
+    };
+    const timer = setTimeout(() => {
+      if (MEMORY_DEBUG) console.warn('[writer] memory', scope, 'timeout');
+      done(workspaceDir ? readMemoryMdFiles(workspaceDir) : []);
+    }, timeoutMs);
+    const child = spawn('openclaw', ['memory-pro', 'list', '--scope', scope, '--json', '--limit', String(MEMORY_LIMIT)], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    });
+    child.stdout.on('data', () => {
+      // JSON 数据在 stderr，stdout 只有插件日志
+    });
+    child.stderr.on('data', (chunk) => {
+      raw += chunk.toString('utf-8');
+      if (raw.length > 2 * 1024 * 1024) raw = raw.slice(-512 * 1024);
+    });
+    child.on('error', () => {
+      if (MEMORY_DEBUG) console.warn('[writer] memory', scope, 'spawn error');
+      done(workspaceDir ? readMemoryMdFiles(workspaceDir) : []);
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      if (resolved) return;
+      let entries = parseMemoryListOutput(raw, scope);
+      const mdEntries = workspaceDir ? readMemoryMdFiles(workspaceDir) : [];
+      if (mdEntries.length > 0) entries = entries.concat(mdEntries);
+      if (MEMORY_DEBUG || entries.length > 0) console.log('[writer] memory', scope, '->', entries.length, '条');
+      done(entries);
+    });
+  });
 }
 
 async function probeGatewayReachability() {
   let base = GATEWAY_FALLBACK_URL;
   try {
-    const raw = fs.readFileSync(OPENCLAW_CONFIG_FILE, 'utf-8');
+    const configPath = path.join(OPENCLAW_DIR, 'openclaw.json');
+    const raw = fs.readFileSync(configPath, 'utf-8');
     const cfg = JSON.parse(raw);
     if (cfg && cfg.gateway && cfg.gateway.url) base = cfg.gateway.url;
   } catch (_) {}
@@ -1300,20 +1215,50 @@ async function updateStatus() {
   const byAgent = (status.sessions && status.sessions.byAgent) ? status.sessions.byAgent : [];
   const agentsList = (status.agents && status.agents.agents) ? status.agents.agents : [];
   const heartbeatAgents = (status.heartbeat && status.heartbeat.agents) ? status.heartbeat.agents : [];
+  const recentSessions = (status.sessions && status.sessions.recent) ? status.sessions.recent.slice(0, 20) : [];
   const agentModelFromConfig = getAgentModelFromOpenClawConfig();
   const agentChannelsFromConfig = getAgentChannelsFromConfig();
   const agentGroupFromConfig = getAgentGroupFromOpenClawConfig();
 
+  // 统计每个 Agent 的 Subagent（临时分身）数量（key 格式: agent:<agentId>:subagent:<sessionId>）
+  // Subagent 活跃判定：age < 2 分钟
+  const SUBAGENT_ACTIVE_MS = 120000; // 2 分钟
+  const subagentCounts = {};
+  recentSessions.forEach((s) => {
+    const key = s.key || '';
+    // 匹配 agent:<agentId>:subagent:... 模式
+    const match = key.match(/^agent:([^:]+):subagent:/);
+    if (match) {
+      const parentAgentId = match[1];
+      const age = s.age;
+      if (age != null && age < SUBAGENT_ACTIVE_MS) {
+        subagentCounts[parentAgentId] = (subagentCounts[parentAgentId] || 0) + 1;
+      }
+    }
+  });
+
   const agents = agentsList.map((a, index) => {
-    const lastActiveAgeMs = a.lastActiveAgeMs != null ? a.lastActiveAgeMs : null;
-    const isActive = lastActiveAgeMs != null && lastActiveAgeMs < ACTIVE_AGE_MS;
     const sessionInfo = byAgent.find((b) => b.agentId === a.id);
+    // 使用最近会话的 age（毫秒）判断活动状态，比 lastActiveAgeMs 更准确
     const recent = (sessionInfo && sessionInfo.recent && sessionInfo.recent[0]) ? sessionInfo.recent[0] : null;
+    const sessionAgeMs = recent && recent.age != null ? recent.age : null;
+    const isActive = sessionAgeMs != null && sessionAgeMs < ACTIVE_AGE_MS;
+    const subagentCount = subagentCounts[a.id] || 0;
     const hb = heartbeatAgents.find((h) => h.agentId === a.id);
     const statusStr = isActive ? 'thinking' : 'idle';
-    let message = isActive
-      ? `活动中 (${(lastActiveAgeMs / 1000).toFixed(0)}s 前)`
-      : (a.sessionsCount > 0 ? `${a.sessionsCount} 会话` : '等待中...');
+    let message;
+    if (subagentCount > 0) {
+      message = `🌀 ${subagentCount} 分身活动中`;
+    } else if (isActive) {
+      const secs = Math.floor(sessionAgeMs / 1000);
+      const mins = Math.floor(secs / 60);
+      const timeStr = mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`;
+      message = `🌀 活动中 (${timeStr})`;
+    } else if (a.sessionsCount > 0) {
+      message = `${a.sessionsCount} 会话`;
+    } else {
+      message = '等待中...';
+    }
     if (recent && recent.percentUsed != null) {
       message += ` · 上下文 ${recent.percentUsed}%`;
     }
@@ -1329,13 +1274,14 @@ async function updateStatus() {
       message,
       model: modelId,
       boundChannels,
-      lastActive: a.lastUpdatedAt ? new Date(a.lastUpdatedAt).toISOString() : null,
+      lastActive: (recent && recent.updatedAt) ? new Date(recent.updatedAt).toISOString() : (a.lastUpdatedAt ? new Date(a.lastUpdatedAt).toISOString() : null),
       sessionCount: a.sessionsCount ?? 0,
       totalTokens: recent && recent.totalTokens != null ? recent.totalTokens : null,
       percentUsed: recent && recent.percentUsed != null ? recent.percentUsed : null,
       lastSessionId: recent ? recent.sessionId : null,
       heartbeat: hb ? (hb.enabled ? hb.every : 'off') : 'off',
       workspaceDir: REDACT_PATHS ? null : (a.workspaceDir || null),
+      subagentCount, // 分身数量
     };
   });
 
@@ -1526,12 +1472,11 @@ async function updateStatus() {
     : null;
 
   // 最近会话 + 会话内容预览
-  let recentSessions = (status.sessions && status.sessions.recent) ? status.sessions.recent.slice(0, 20) : [];
   const sessionDirsByAgent = {};
   byAgent.forEach((b) => {
     sessionDirsByAgent[b.agentId] = path.dirname(b.path);
   });
-  recentSessions = recentSessions.map((s, idx) => {
+  const sessionsWithPreviews = recentSessions.map((s, idx) => {
     const out = { ...s };
     if (idx < SESSION_CONTENT_PREVIEW_MAX) {
       const sessionDir = sessionDirsByAgent[s.agentId];
@@ -1559,7 +1504,7 @@ async function updateStatus() {
     channelHealth,
     modelHealth,
     sessionsTotal: (status.sessions && status.sessions.count) != null ? status.sessions.count : null,
-    recentSessions,
+    recentSessions: sessionsWithPreviews,
     system,
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
     tokenCumulative: (() => {
@@ -1597,8 +1542,12 @@ function updateMemory() {
     return;
   }
   const agents = data.agents || [];
-  const scopes = ['global'].concat(agents.map((a) => 'agent:' + a.id));
-  Promise.allSettled(scopes.map((scope) => getMemoryForScopeAsync(scope)))
+  // 构建 scope 和对应 workspaceDir 的映射
+  const memoryScopes = [{ scope: 'global', workspaceDir: agents[0]?.workspaceDir || null }];
+  agents.forEach((a) => {
+    memoryScopes.push({ scope: 'agent:' + a.id, workspaceDir: a.workspaceDir || null });
+  });
+  Promise.allSettled(memoryScopes.map(({ scope, workspaceDir }) => getMemoryForScopeAsync(scope, workspaceDir)))
     .then((outcomes) => {
       const results = outcomes.map((o, i) => {
         if (o.status === 'fulfilled') return o.value;
@@ -1679,7 +1628,7 @@ function serveMemoryApi(req, res) {
     res.end(JSON.stringify({ error: 'scope too long' }));
     return true;
   }
-  // 格式：global 或 agent:<id>；Agent ID 允许字母数字、下划线、点、连字符，若 OpenClaw 规范更严可在此收紧
+  // 格式：global 或 agent:<id>；Agent ID 允许字母数字、下划线、点、连字符
   const safe = /^(global|agent:[a-zA-Z0-9_.-]+)$/.test(scope) ? scope : null;
   if (!safe) {
     console.log('[writer] GET /memory 非法 scope', scope);
@@ -1687,10 +1636,22 @@ function serveMemoryApi(req, res) {
     res.end(JSON.stringify({ error: 'invalid scope' }));
     return true;
   }
-  console.log('[writer] GET /memory?scope=' + safe);
+  // 从 agent-status.json 获取 workspaceDir
+  let workspaceDir = null;
+  try {
+    const data = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
+    if (safe === 'global') {
+      workspaceDir = data.agents && data.agents[0] ? data.agents[0].workspaceDir : null;
+    } else {
+      const agentId = safe.replace('agent:', '');
+      const agent = data.agents && data.agents.find((a) => a.id === agentId);
+      workspaceDir = agent ? agent.workspaceDir : null;
+    }
+  } catch (_) {}
+  console.log('[writer] GET /memory?scope=' + safe + (workspaceDir ? ' workspace=' + workspaceDir : ''));
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  getMemoryForScopeAsync(safe)
+  getMemoryForScopeAsync(safe, workspaceDir)
     .then((entries) => {
       console.log('[writer] GET /memory?scope=' + safe, '响应', entries.length, '条');
       res.end(JSON.stringify(entries));

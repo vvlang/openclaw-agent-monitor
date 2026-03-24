@@ -927,6 +927,8 @@
                     var tokenBarHtml = (agent.percentUsed != null) ? ('<div class="agent-token-bar" title="上下文 ' + agent.percentUsed + '%"><div class="agent-token-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>') : '';
                     var lastActiveStr = agent.lastActive ? formatTimeAgo(agent.lastActive) : '';
                     var lastActiveHtml = lastActiveStr ? ('<div class="text-[9px] text-slate-500" title="最后活跃">活跃 ' + escapeHtml(lastActiveStr) + '</div>') : '';
+                    // 分身指示器
+                    var subagentBadge = (agent.subagentCount > 0) ? ('<div class="text-[9px] px-1 py-0.5 rounded bg-violet-600 text-white border border-violet-500 mt-0.5" title="临时分身">🌀 ' + agent.subagentCount + ' 分身</div>') : '';
                     card.innerHTML =
                         '<div class="absolute top-0 left-0 right-0 h-0.5 rounded-t-xl ' + (agent.color || 'bg-gray-500') + '"></div>' +
                         '<div class="agent-card-content pt-1.5">' +
@@ -938,6 +940,7 @@
                         (metaLine ? '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center" title="' + escapeHtml(agent.model || '') + '">' + metaLine + '</div>' : '') +
                         (channelTags ? '<div class="flex flex-wrap gap-0.5 justify-center">' + channelTags + '</div>' : '') +
                         '<div class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
+                        subagentBadge +
                         tokenBarHtml +
                         (tokenStr ? '<div class="text-[9px] text-slate-500 font-mono" title="' + escapeHtml(tokenTitle) + '">' + tokenStr + '</div>' : '') +
                         lastActiveHtml +
