@@ -12,7 +12,6 @@ const path = require('path');
 const os = require('os');
 const http = require('http');
 const https = require('https');
-const url = require('url');
 
 /** 从原始字符串中提取第一个完整 JSON 对象（按大括号深度） */
 function extractJsonObject(raw) {
@@ -119,7 +118,7 @@ function probeGatewayApiHealth(baseUrl, token) {
   return new Promise((resolve) => {
     let parsed;
     try {
-      parsed = url.parse(healthUrl);
+      parsed = new URL(healthUrl);
     } catch (_) {
       resolve({ ok: false });
       return;
@@ -128,7 +127,7 @@ function probeGatewayApiHealth(baseUrl, token) {
     const opts = {
       hostname: parsed.hostname,
       port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-      path: parsed.path || '/api/health',
+      path: parsed.pathname + parsed.search,
       method: 'GET',
       timeout: GATEWAY_PROBE_TIMEOUT_MS,
     };
@@ -158,20 +157,20 @@ function normalizeProbeUrl(gatewayUrl) {
   let s = gatewayUrl.trim().replace(/\/$/, '');
   if (s.startsWith('ws://')) s = 'http://' + s.slice(5);
   else if (s.startsWith('wss://')) s = 'https://' + s.slice(6);
-  // 如果 URL 没有路径（只有 host:port），加上 '/' 让 url.parse 正确解析 port
+  // 如果 URL 没有路径（只有 host:port），加上 '/' 让 new URL() 正确解析 port
   if (!s.includes('/')) s += '/';
   let parsed;
   try {
-    parsed = url.parse(s);
+    parsed = new URL(s);
   } catch (_) {
     return null;
   }
   if (!parsed.hostname) return null;
   let port = parsed.port;
-  if (!port && (parsed.protocol === 'https:' || s.startsWith('https://'))) port = 443;
-  if (!port && (parsed.protocol === 'http:' || s.startsWith('http://'))) port = 80;
+  if (!port && (parsed.protocol === 'https:')) port = 443;
+  if (!port && (parsed.protocol === 'http:')) port = 80;
   if (!port) port = 18789;
-  const protocol = (parsed.protocol === 'https:' || s.startsWith('https://')) ? 'https:' : 'http:';
+  const protocol = parsed.protocol;
   const path = (parsed.pathname && parsed.pathname !== '/') ? parsed.pathname : '';
   const portPart = (port === 80 && protocol === 'http:') || (port === 443 && protocol === 'https:') ? '' : (':' + port);
   return protocol + '//' + parsed.hostname + portPart + path;
@@ -1440,7 +1439,7 @@ async function updateStatus() {
     let probeOk = await probeGatewayUrl(urlToProbe);
     if (!probeOk) {
       try {
-        const parsed = url.parse(urlToProbe);
+        const parsed = new URL(urlToProbe);
         const base = (parsed.protocol || 'http:') + '//' + (parsed.hostname || '127.0.0.1') + ':' + (parsed.port || (parsed.protocol === 'https:' ? 443 : 18789));
         probeOk = await probeGatewayUrl(base + '/health');
       } catch (_) {}
@@ -1667,9 +1666,10 @@ else console.log('角色记忆: 已关闭');
 const SERVER_PORT = parseInt(process.env.OPENCLAW_MONITOR_PORT || '3880', 10) || 3880;
 
 function serveMemoryApi(req, res) {
-  const parsed = url.parse(req.url, true);
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
   if (parsed.pathname !== '/memory' || req.method !== 'GET') return false;
-  const scope = parsed.query && parsed.query.scope;
+  const scope = parsed.searchParams.get('scope');
   if (!scope || typeof scope !== 'string') {
     console.log('[writer] GET /memory 缺少 scope');
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1719,7 +1719,8 @@ function serveMemoryApi(req, res) {
 }
 
 function serveStatic(req, res) {
-  const parsed = url.parse(req.url, true);
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
   res.setHeader('Access-Control-Allow-Origin', '*');
   let filePath = parsed.pathname === '/' || parsed.pathname === '' ? '/agent-dashboard.html' : parsed.pathname;
   if (filePath === '/agent-status.json') {
@@ -1786,7 +1787,8 @@ function writeCostConfig(data) {
 }
 
 function serveCostConfigApi(req, res) {
-  const parsed = url.parse(req.url, true);
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
   if (parsed.pathname !== '/cost-config') return false;
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1842,9 +1844,10 @@ function serveCostConfigApi(req, res) {
  *  费用基于 /cost-config 中的模型单价计算。
  */
 function serveCostHistoryApi(req, res) {
-  const parsed = url.parse(req.url, true);
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
   if (parsed.pathname !== '/cost-history') return false;
-  const days = Math.max(1, Math.min(365, parseInt(parsed.query.days || '30', 10) || 30));
+  const days = Math.max(1, Math.min(365, parseInt(parsed.searchParams.get('days') || '30', 10) || 30));
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
   try {
@@ -1863,7 +1866,8 @@ function serveCostHistoryApi(req, res) {
  *  返回结构：{ byVendorModel, totalCalls, history: { stats, todayTotal } }
  */
 function serveCallStatsApi(req, res) {
-  const parsed = url.parse(req.url, true);
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
   if (parsed.pathname !== '/call-stats') return false;
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');

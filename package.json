@@ -13,9 +13,13 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["openclaw", "monitor", "dashboard"],
+  "keywords": [
+    "openclaw",
+    "monitor",
+    "dashboard"
+  ],
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^11.6.0"
+    "better-sqlite3": "^12.8.0"
   }
 }
