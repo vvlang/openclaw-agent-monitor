@@ -149,7 +149,7 @@ node agent-status-writer.js
 
 | 常量 | 默认值 | 说明 |
 |------|--------|------|
-| `ACTIVE_AGE_MS` | 120000 | 某 Agent 最后活动距今年龄小于此时视为「工作中」(thinking)，否则「空闲」(idle)。 |
+| `ACTIVE_AGE_MS` | 180000 | 某 Agent 最后活动距今年龄小于此时视为「工作中」(thinking)，否则「空闲」(idle)。 |
 | `SESSION_JSONL_LAST_LINES` | 50 | 每个会话的 `.jsonl` 只读最后 N 行，用于提取消息。 |
 | `PREVIEW_TEXT_LEN` | 120 | 每条消息预览的最大字符数，超出以「…」截断。 |
 | `PREVIEW_MESSAGES` | 4 | 每个会话保留最近几条 user/assistant 消息。 |

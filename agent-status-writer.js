@@ -645,7 +645,7 @@ const SYSTEM_INFO_CMD_TIMEOUT_MS = Math.max(
   1000,
   parseInt(process.env.OPENCLAW_MONITOR_SYSTEM_INFO_TIMEOUT_MS || '5000', 10) || 5000
 );
-const ACTIVE_AGE_MS = 600000; // 10 分钟内有活动视为 thinking（使用 session age 判断）
+const ACTIVE_AGE_MS = 180000; // 3 分钟内有活动视为 thinking（使用 session age 判断）
 const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
 const PREVIEW_TEXT_LEN = 120; // 每条消息预览最大字符
