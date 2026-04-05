@@ -6,7 +6,7 @@
  * 绝不修改或写入 ~/.openclaw 下任何文件（含 alerts.json）。所有写入仅限项目目录（__dirname）下。
  */
 
-const { execSync, spawn, exec } = require('child_process');
+const { spawn, exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -42,25 +42,16 @@ const OPENCLAW_CONFIG_DIR = process.env.OPENCLAW_DIR || path.join(os.homedir(), 
 /** status --json 重定向输出的可写临时目录（避免硬编码 /tmp 在部分环境不可写） */
 const MONITOR_TMP_DIR = process.env.OPENCLAW_MONITOR_TMP_DIR || path.join(__dirname, '.tmp');
 
-function ensureMonitorTmpDir() {
-  try {
-    fs.mkdirSync(MONITOR_TMP_DIR, { recursive: true });
-    return MONITOR_TMP_DIR;
-  } catch (e) {
-    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
-      console.warn('[writer] ensureMonitorTmpDir failed:', e && e.message ? e.message : e);
-    }
-    return null;
-  }
-}
-
 /** 判断路径是否在 OPENCLAW_DIR 下（用于插件路径重写） */
 function isUnderOpenClawDir(p) {
   try {
     const abs = path.resolve(String(p));
     const root = path.resolve(OPENCLAW_DIR);
     return abs === root || abs.startsWith(root + path.sep);
-  } catch (_) {
+  } catch (e) {
+    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] path check error:', e.message || e);
+    }
     return false;
   }
 }
@@ -80,9 +71,11 @@ let gatewayProbeCache = { reachable: null, displayUrl: null, at: 0 };
 /** 全局串行队列：同一时刻只运行一个 openclaw 子进程（status/health/models/plugins），避免进程爆炸 */
 let openclawQueue = Promise.resolve();
 function withOpenClawQueue(fn) {
-  const next = openclawQueue.then(() => fn()).catch((e) => { throw e; });
-  openclawQueue = next.catch((e) => { console.error('[writer] openclaw queue error:', e && e.message ? e.message : e); });
-  return next;
+  openclawQueue = openclawQueue.then(() => fn()).catch((e) => {
+    console.error('[writer] openclaw queue error:', e && e.message ? e.message : e);
+    throw e;
+  });
+  return openclawQueue;
 }
 
 /** 将 ws/wss URL 转为 http/https，供 Control UI 链接使用（浏览器打开需 http） */
@@ -286,7 +279,11 @@ function getModelsStatusJson() {
   return withOpenClawQueue(getModelsStatusJsonImpl);
 }
 
-/** 从 health JSON 中归一化出 channelHealth 数组（兼容多种字段名与嵌套结构） */
+/**
+ * 从 health JSON 中归一化出 channelHealth 数组（兼容多种字段名与嵌套结构）
+ * @param {object} healthJson - openclaw health --json 的输出
+ * @returns {Array<{ channel: string, healthy: boolean, error: string|null }>}
+ */
 function normalizeChannelHealthFromHealth(healthJson) {
   if (!healthJson || typeof healthJson !== 'object') return [];
   let list = healthJson.channels || healthJson.channelProbes || healthJson.probes || healthJson.probeResults || [];
@@ -336,6 +333,11 @@ function normalizeChannelHealthFromHealth(healthJson) {
 }
 
 /** 从 models status JSON 中归一化出 modelHealth 数组 */
+/**
+ * 从 models status JSON 中归一化出 modelHealth 数组
+ * @param {object} modelsJson - openclaw models status --json 的输出
+ * @returns {Array<{ modelId: string, available: boolean, error: string|null }>}
+ */
 function normalizeModelHealthFromModelsStatus(modelsJson) {
   if (!modelsJson || typeof modelsJson !== 'object') return [];
   const list = modelsJson.models || modelsJson.list || [];
@@ -397,6 +399,9 @@ function refreshOpenClawConfig() {
     } catch (fallbackErr) {
       readError = fallbackErr.message;
       config = {}; // 读取失败时使用空配置
+      if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+        console.warn('[writer] 读取 clawdbot.json 失败:', fallbackErr.message);
+      }
     }
   }
   
@@ -423,15 +428,19 @@ function createIsolatedOpenClawEnv() {
   // 使用 /dev/shm（tmpfs）作为临时配置目录，所有数据存储在内存中，重启即清空
   const tmpRoot = '/dev/shm';
   const tmpDir = path.join(tmpRoot, 'openclaw-monitor-' + process.pid + '-' + Date.now());
+  let createdDir = false;
   try {
     fs.mkdirSync(tmpDir, { recursive: true });
+    createdDir = true;
     const baseConfig = getCachedOpenClawConfig();
     const config = JSON.parse(JSON.stringify(baseConfig || {}));
     // 只写配置文件，不复制插件目录（插件使用绝对路径，复制大目录会阻塞）
     fs.writeFileSync(path.join(tmpDir, 'openclaw.json'), JSON.stringify(config, null, 2), 'utf-8');
     return { env: { ...process.env, OPENCLAW_DIR: tmpDir }, tmpDir };
   } catch (e) {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    if (createdDir) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+    }
     throw e;
   }
 }
@@ -439,7 +448,11 @@ function createIsolatedOpenClawEnv() {
 function cleanupTmpDir(tmpDir) {
   try {
     if (tmpDir && fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch (_) {}
+  } catch (e) {
+    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] cleanupTmpDir failed:', e.message || e);
+    }
+  }
 }
 
 /** 从 OpenClaw 配置文件收集所有模型 ID（models.providers、agents.defaults.models、agents.list[].model） */
@@ -645,6 +658,14 @@ const SYSTEM_INFO_CMD_TIMEOUT_MS = Math.max(
   1000,
   parseInt(process.env.OPENCLAW_MONITOR_SYSTEM_INFO_TIMEOUT_MS || '5000', 10) || 5000
 );
+
+/**
+ * 行为配置常量
+ * ACTIVE_AGE_MS: 3 分钟内有活动视为 thinking
+ * SESSION_CONTENT_PREVIEW_MAX: 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
+ * REDACT_PATHS: 为 1 时不输出本机绝对路径
+ * MEMORY_ENABLED: 为 1 时关闭角色记忆拉取
+ */
 const ACTIVE_AGE_MS = 180000; // 3 分钟内有活动视为 thinking（使用 session age 判断）
 const SESSION_CONTENT_PREVIEW_MAX = process.env.OPENCLAW_MONITOR_NO_CONTENT_PREVIEW === '1' ? 0 : 10; // 为 0 时不写入会话内容预览（避免敏感信息进同步文件）
 const SESSION_JSONL_LAST_LINES = 50; // 每个会话读取最后 N 行
@@ -695,7 +716,11 @@ function extractTextFromContent(content) {
 
 const SESSION_JSONL_MAX_SIZE = 50 * 1024 * 1024; // 50MB，超过则跳过读取以保护性能
 
-/** 进程内写入锁：避免 updateStatus 与 updateMemory 并发写 agent-status.json 导致数据损坏 */
+/**
+ * 进程内写入锁：避免 updateStatus 与 updateMemory 并发写 agent-status.json 导致数据损坏
+ * @param {object} data - 要写入的 JSON 数据
+ * @returns {boolean} true 表示写入成功，false 表示被锁住
+ */
 let statusFileWriteInProgress = false;
 function safeWriteStatusFile(data) {
   if (statusFileWriteInProgress) {
@@ -717,12 +742,20 @@ function isSessionPathSafe(sessionDir) {
     const abs = path.resolve(sessionDir);
     const root = path.resolve(OPENCLAW_DIR);
     return abs.startsWith(root + path.sep);
-  } catch (_) {
+  } catch (e) {
+    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] path check error:', e.message || e);
+    }
     return false;
   }
 }
 
-/** 读取会话 .jsonl 中真正的最后几条 user/assistant 文本消息（从文件末尾往前扫） */
+/**
+ * 读取会话 .jsonl 中真正的最后几条 user/assistant 文本消息（从文件末尾往前扫）
+ * @param {string} sessionDir - 会话目录路径
+ * @param {string} sessionId - 会话 ID
+ * @returns {Array<{ role: string, text: string }>|null}
+ */
 function readSessionContentPreview(sessionDir, sessionId) {
   if (!isSessionPathSafe(sessionDir)) {
     if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
@@ -794,7 +827,7 @@ function execAsync(cmd, args, timeoutMs) {
  * 通用的 spawn + JSON 解析模式，避免重复代码。
  * @param {string[]} args - openclaw 命令参数
  * @param {number} timeoutMs - 超时毫秒
- * @param {object} opts - 选项 { useTmpDir: bool, queue: bool }
+ * @param {{ useTmpDir?: boolean, queue?: boolean, maxBuffer?: number }} [opts] - 选项
  * @returns {Promise<object|null>}
  */
 function spawnOpenClawJson(args, timeoutMs, opts = {}) {
@@ -813,11 +846,10 @@ function spawnOpenClawJson(args, timeoutMs, opts = {}) {
     return new Promise((resolve) => {
       let raw = '';
       let resolved = false;
-      const cleanup = () => { if (tmpDir) cleanupTmpDir(tmpDir); };
       const done = (result) => {
         if (resolved) return;
         resolved = true;
-        cleanup();
+        if (tmpDir) cleanupTmpDir(tmpDir);
         resolve(result);
       };
       const child = spawn('openclaw', args, {
@@ -840,7 +872,8 @@ function spawnOpenClawJson(args, timeoutMs, opts = {}) {
       };
       child.stdout.on('data', (chunk) => {
         raw += chunk.toString('utf-8');
-        if (raw.length > maxBuffer) raw = raw.slice(-Math.floor(maxBuffer / 2));
+        // 截断时保留前半部分（JSON 通常从开头开始），避免丢失结构
+        if (raw.length > maxBuffer) raw = raw.slice(0, Math.floor(maxBuffer / 2));
         tryParse();
       });
       child.stderr.on('data', () => {});
@@ -854,7 +887,10 @@ function spawnOpenClawJson(args, timeoutMs, opts = {}) {
   return queue ? withOpenClawQueue(impl) : impl();
 }
 
-/** 采集本机系统信息：CPU、内存、磁盘、IP、网络（全部异步，无 execSync 阻塞） */
+/**
+ * 采集本机系统信息：CPU、内存、磁盘、IP、网络（全部异步，无 execSync 阻塞）
+ * @returns {Promise<{ cpu: number|null, memory: {usedPct: number, totalGb: string, freeGb: string}|null, disk: number|null, ip: string|null, network: string, platform: string }>}
+ */
 async function getSystemInfo() {
   const info = {
     cpu: null,
@@ -941,6 +977,7 @@ async function getSystemInfo() {
 /**
  * 拉取 openclaw status --json。纯内存收集 stdout，避免使用临时文件。
  * 注意：此处必须使用真实 OPENCLAW_DIR（需读 agents/sessions）。
+ * @returns {Promise<object|null>} 解析后的 status JSON，失败返回 null
  */
 function getStatusJsonImpl() {
   return new Promise((resolve) => {
@@ -1137,7 +1174,12 @@ function readMemoryMdFiles(workspaceDir) {
   return entries;
 }
 
-/** 异步拉取某 scope 的记忆。memory-pro 只读数据，不在 ~/.openclaw 写文件，无需隔离环境。 */
+/**
+ * 异步拉取某 scope 的记忆。memory-pro 只读数据，不在 ~/.openclaw 写文件，无需隔离环境。
+ * @param {string} scope - 记忆范围，格式为 "global" 或 "agent:<id>"
+ * @param {string|null} workspaceDir - Agent 的 workspace 目录路径
+ * @returns {Promise<Array<{ id: string|null, text: string, category: string|null, importance: number|null, timestamp: any }>>}
+ */
 function getMemoryForScopeAsync(scope, workspaceDir) {
   // 安全校验：仅允许字母数字、下划线、点、连字符、冒号（用于 agent:<id> 格式）
   if (!scope || typeof scope !== 'string' || !/^(global|agent:[a-zA-Z0-9_.-]+)$/.test(scope)) {
@@ -1313,7 +1355,11 @@ async function updateStatus() {
   let prevData = null;
   try {
     prevData = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
-  } catch (_) {}
+  } catch (e) {
+    if (process.env.OPENCLAW_MONITOR_DEBUG === '1') {
+      console.warn('[writer] 读取 agent-status.json 失败:', e.message || e);
+    }
+  }
   if (MEMORY_ENABLED) {
     agents.forEach((a, i) => {
       a.memoryEntries = (prevData && Array.isArray(prevData.agents) && prevData.agents[i] && Array.isArray(prevData.agents[i].memoryEntries))
@@ -1330,7 +1376,9 @@ async function updateStatus() {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.byAgent === 'object') tokenState.byAgent = parsed.byAgent;
     if (parsed && typeof parsed.byModel === 'object') tokenState.byModel = parsed.byModel;
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[writer] 读取 token-cumulative-state 失败:', e.message || e);
+  }
   const cumulativeByAgent = {};
   let tokenCumulativeGlobal = 0;
   const statusAvailable = !!status;
@@ -1347,7 +1395,7 @@ async function updateStatus() {
         if (delta > 0) {
           rec.cumulativeTokens += delta;
           tokenState.byModel[modelId] = (tokenState.byModel[modelId] || 0) + delta;
-          try { tokenDb.init(); tokenDb.insertUsage({ modelId, tokens: delta, calls: 1, agentId: a.id, sessionId }); } catch (e) { console.warn('[writer] insertUsage 失败:', e.message || e); }
+          try { tokenDb.init(); tokenDb.insertUsage({ modelId, tokens: delta, calls: 1, agentId: a.id, sessionId }); } catch (e) { console.warn('[writer] insertUsage 失败 (delta):', e.message || e); }
         }
         rec.lastTotalTokens = totalTokens;
       } else {
@@ -1355,7 +1403,7 @@ async function updateStatus() {
           rec.cumulativeTokens += rec.lastTotalTokens;
           const lastModel = rec.lastModelId || 'unknown';
           tokenState.byModel[lastModel] = (tokenState.byModel[lastModel] || 0) + rec.lastTotalTokens;
-          try { tokenDb.init(); tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, calls: 1, agentId: a.id, sessionId: rec.lastSessionId }); } catch (e) { console.warn('[writer] insertUsage 失败:', e.message || e); }
+          try { tokenDb.init(); tokenDb.insertUsage({ modelId: lastModel, tokens: rec.lastTotalTokens, calls: 1, agentId: a.id, sessionId: rec.lastSessionId }); } catch (e) { console.warn('[writer] insertUsage 失败 (lastTotal):', e.message || e); }
         }
         rec.lastSessionId = sessionId;
         rec.lastTotalTokens = totalTokens;
@@ -1451,34 +1499,6 @@ async function updateStatus() {
       gateway = { ...gateway, reachable: true, error: null };
       console.log('[writer] gateway 状态已由直连/health 探测修正为在线');
     }
-  }
-  // 快速写入：先输出核心 agents/gateway，避免 health/models/system 探测卡住导致卡片长时间不刷新
-  try {
-    const rawControlUrlBase = gateway.reachable ? (gateway.url || GATEWAY_FALLBACK_URL) : null;
-    const controlUiUrlBase = rawControlUrlBase ? toHttpUrl(rawControlUrlBase) : null;
-    const outBase = {
-      lastUpdated: new Date().toISOString(),
-      defaultAgentId: (status.agents && status.agents.defaultId) || null,
-      agents,
-      gateway,
-      gatewayService: null,
-      controlUiUrl: controlUiUrlBase,
-      channels: Array.isArray(status.channelSummary) ? status.channelSummary : [],
-      channelHealth: [],
-      modelHealth: [],
-      sessionsTotal: (status.sessions && status.sessions.count) != null ? status.sessions.count : null,
-      recentSessions,
-      system: null,
-      memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
-      tokenCumulative: { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal },
-      tokenByModel,
-      tokenByVendor,
-      tokenByVendorModel,
-      modelsSummary: getModelsSummaryFromConfig(),
-      pluginsSummary: getPluginsSummaryFromConfig(),
-    };
-    safeWriteStatusFile(outBase);
-  } catch (e) {
   }
 
   let channelHealth = [];
@@ -1604,7 +1624,7 @@ function updateMemory() {
     .then((outcomes) => {
       const results = outcomes.map((o, i) => {
         if (o.status === 'fulfilled') return o.value;
-        console.warn('[writer] updateMemory scope 失败:', scopes[i], (o.reason && (o.reason.message || o.reason)) || o.reason);
+        console.warn('[writer] updateMemory scope 失败:', memoryScopes[i].scope, (o.reason && (o.reason.message || o.reason)) || o.reason);
         return [];
       });
       let latest;
@@ -1839,9 +1859,311 @@ function serveCostConfigApi(req, res) {
   return true;
 }
 
-/** 成本历史 API：GET /cost-history?days=30
- *  返回近 N 天每日 Token 消耗与费用（来自增量日志）。
- *  费用基于 /cost-config 中的模型单价计算。
+// ---------------------------------------------------------------------------
+// 记忆文件编辑 API
+// 分类目录：
+//   memory  → {workspaceDir}/memory/{path}
+//   core    → {workspaceDir}/{path}
+//   archive → {workspaceDir}/../workspace-memory/{path}
+// ---------------------------------------------------------------------------
+
+/**
+ * 安全检查：禁止路径含 .. 或路径分隔符
+ * @param {string} filePath - 文件路径
+ * @returns {boolean}
+ */
+function isMemoryFilePathSafe(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  return !filePath.includes('..') && !filePath.includes('/') && !filePath.includes('\\');
+}
+
+/**
+ * 根据 agentId 从 agent-status.json 查找 workspaceDir
+ * @param {string|null} agentId - Agent ID，为空则返回第一个 Agent 的 workspaceDir
+ * @returns {string|null}
+ */
+function getWorkspaceDirByAgentId(agentId) {
+  try {
+    const data = JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf-8'));
+    if (!agentId) {
+      return data.agents && data.agents[0] ? data.agents[0].workspaceDir : null;
+    }
+    const agent = data.agents && data.agents.find((a) => a.id === agentId);
+    return agent ? agent.workspaceDir : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 根据 category 解析出绝对文件路径 */
+function resolveMemoryFilePath(workspaceDir, filePath, category) {
+  if (!workspaceDir) return null;
+  if (!isMemoryFilePathSafe(filePath)) return null;
+  category = category || 'memory';
+  if (category === 'memory') {
+    return path.join(workspaceDir, 'memory', filePath);
+  } else if (category === 'core') {
+    return path.join(workspaceDir, filePath);
+  } else if (category === 'archive') {
+    return path.join(workspaceDir, '..', 'workspace-memory', filePath);
+  }
+  return null;
+}
+
+/** GET /memory-files?agentId=xxx&category=memory
+ *  返回该 agent workspace 下指定分类目录的 .md 文件列表（相对路径）*/
+function serveMemoryFilesList(req, res) {
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
+  if (parsed.pathname !== '/memory-files' || req.method !== 'GET') return false;
+
+  const agentId = parsed.searchParams.get('agentId') || null;
+  const category = parsed.searchParams.get('category') || 'memory';
+  if (!['memory', 'core', 'archive'].includes(category)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid category' }));
+    return true;
+  }
+
+  const workspaceDir = getWorkspaceDirByAgentId(agentId);
+  if (!workspaceDir) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'workspaceDir not found for agent' }));
+    return true;
+  }
+
+  let dirPath;
+  if (category === 'memory') {
+    dirPath = path.join(workspaceDir, 'memory');
+  } else if (category === 'core') {
+    dirPath = workspaceDir;
+  } else {
+    dirPath = path.join(workspaceDir, '..', 'workspace-memory');
+  }
+
+  let files = [];
+  try {
+    if (fs.existsSync(dirPath)) {
+      files = fs.readdirSync(dirPath)
+        .filter((f) => f.endsWith('.md'))
+        .sort();
+    }
+  } catch (_) {}
+
+  console.log('[writer] GET /memory-files category=' + category + ' agentId=' + agentId + ' -> ' + files.length + ' files');
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.end(JSON.stringify({ files, category, workspaceDir }));
+  return true;
+}
+
+/** GET /memory-file?path=xxx&agentId=xxx&category=memory */
+function serveMemoryFileRead(req, res) {
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
+  if (parsed.pathname !== '/memory-file' || req.method !== 'GET') return false;
+
+  const filePath = parsed.searchParams.get('path');
+  const agentId = parsed.searchParams.get('agentId') || null;
+  const category = parsed.searchParams.get('category') || 'memory';
+
+  if (!filePath || !isMemoryFilePathSafe(filePath)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid or missing path' }));
+    return true;
+  }
+  if (!['memory', 'core', 'archive'].includes(category)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid category' }));
+    return true;
+  }
+
+  const workspaceDir = getWorkspaceDirByAgentId(agentId);
+  if (!workspaceDir) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'workspaceDir not found' }));
+    return true;
+  }
+
+  const absPath = resolveMemoryFilePath(workspaceDir, filePath, category);
+  if (!absPath) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'path resolution failed' }));
+    return true;
+  }
+
+  // 禁止跨出 workspace 目录
+  const safeRoot = path.resolve(category === 'archive' ? path.join(workspaceDir, '..') : workspaceDir);
+  if (!path.resolve(absPath).startsWith(safeRoot + path.sep)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'forbidden' }));
+    return true;
+  }
+
+  try {
+    const content = fs.readFileSync(absPath, 'utf-8');
+    const stat = fs.statSync(absPath);
+    console.log('[writer] GET /memory-file ' + category + '/' + filePath + ' -> ok');
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end(JSON.stringify({ path: filePath, category, content, mtimeMs: stat.mtimeMs }));
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'file not found' }));
+    } else {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || String(e) }));
+    }
+  }
+  return true;
+}
+
+/** POST /memory-file  Body: { path, content, agentId, category } */
+function serveMemoryFileWrite(req, res) {
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
+  if (parsed.pathname !== '/memory-file' || req.method !== 'POST') return false;
+
+  const chunks = [];
+  let totalSize = 0;
+  const MAX_BODY = 2 * 1024 * 1024; // 2MB
+  req.on('data', (chunk) => {
+    totalSize += chunk.length;
+    if (totalSize > MAX_BODY) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'body too large' }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => {
+    try {
+      const body = Buffer.concat(chunks).toString('utf-8');
+      const data = JSON.parse(body);
+      const { path: filePath, content, agentId, category } = data || {};
+
+      if (!filePath || !isMemoryFilePathSafe(filePath)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid or missing path' }));
+        return;
+      }
+      const cat = category || 'memory';
+      if (!['memory', 'core', 'archive'].includes(cat)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid category' }));
+        return;
+      }
+
+      const workspaceDir = getWorkspaceDirByAgentId(agentId);
+      if (!workspaceDir) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'workspaceDir not found' }));
+        return;
+      }
+
+      const absPath = resolveMemoryFilePath(workspaceDir, filePath, cat);
+      if (!absPath) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'path resolution failed' }));
+        return;
+      }
+
+      const safeRoot = path.resolve(cat === 'archive' ? path.join(workspaceDir, '..') : workspaceDir);
+      if (!path.resolve(absPath).startsWith(safeRoot + path.sep)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forbidden' }));
+        return;
+      }
+
+      // 自动创建父目录
+      const dir = path.dirname(absPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      fs.writeFileSync(absPath, content != null ? String(content) : '', 'utf-8');
+      console.log('[writer] POST /memory-file ' + cat + '/' + filePath + ' -> ok');
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.end(JSON.stringify({ ok: true, path: filePath, category: cat }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message || String(e) }));
+    }
+  });
+  return true;
+}
+
+/** DELETE /memory-file?path=xxx&agentId=xxx&category=memory */
+function serveMemoryFileDelete(req, res) {
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
+  if (parsed.pathname !== '/memory-file' || req.method !== 'DELETE') return false;
+
+  const filePath = parsed.searchParams.get('path');
+  const agentId = parsed.searchParams.get('agentId') || null;
+  const category = parsed.searchParams.get('category') || 'memory';
+
+  if (!filePath || !isMemoryFilePathSafe(filePath)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid or missing path' }));
+    return true;
+  }
+  if (!['memory', 'core', 'archive'].includes(category)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid category' }));
+    return true;
+  }
+
+  const workspaceDir = getWorkspaceDirByAgentId(agentId);
+  if (!workspaceDir) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'workspaceDir not found' }));
+    return true;
+  }
+
+  const absPath = resolveMemoryFilePath(workspaceDir, filePath, category);
+  if (!absPath) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'path resolution failed' }));
+    return true;
+  }
+
+  const safeRoot = path.resolve(category === 'archive' ? path.join(workspaceDir, '..') : workspaceDir);
+  if (!path.resolve(absPath).startsWith(safeRoot + path.sep)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'forbidden' }));
+    return true;
+  }
+
+  try {
+    if (fs.existsSync(absPath)) {
+      fs.unlinkSync(absPath);
+      console.log('[writer] DELETE /memory-file ' + category + '/' + filePath + ' -> ok');
+    }
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end(JSON.stringify({ ok: true }));
+  } catch (e) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message || String(e) }));
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// 成本历史 API
+// ---------------------------------------------------------------------------
+
+/**
+ * 成本历史 API：GET /cost-history?days=30
+ * 返回近 N 天每日 Token 消耗与费用（来自增量日志）。
+ * 费用基于 /cost-config 中的模型单价计算。
+ * @param {http.IncomingMessage} req
+ * @param {http.ServerResponse} res
+ * @returns {boolean}
  */
 function serveCostHistoryApi(req, res) {
   let parsed;
@@ -1886,8 +2208,65 @@ function serveCallStatsApi(req, res) {
   return true;
 }
 
+// Rate Limiting: 简单内存版，按 IP 限制请求频率
+const RATE_LIMIT_WINDOW_MS = 1000; // 1秒窗口
+const RATE_LIMIT_MAX_REQUESTS = 100; // 每窗口最多100请求（GET/静态），写操作更严格
+const RATE_LIMIT_WRITE_MAX = 10; // 写操作每窗口最多10次
+const rateLimitMap = new Map(); // ip -> { count, resetAt }
+
+/**
+ * 检查 IP 是否超过请求频率限制
+ * @param {string} ip - 客户端 IP 地址
+ * @param {boolean} isWrite - 是否为写操作
+ * @returns {boolean} true 表示允许，false 表示超过限制
+ */
+function checkRateLimit(ip, isWrite) {
+  const now = Date.now();
+  const maxReq = isWrite ? RATE_LIMIT_WRITE_MAX : RATE_LIMIT_MAX_REQUESTS;
+  let entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+    rateLimitMap.set(ip, entry);
+  }
+  entry.count++;
+  if (entry.count > maxReq) {
+    return false;
+  }
+  // 清理过期条目，避免内存泄漏
+  if (rateLimitMap.size > 10000) {
+    for (const [k, v] of rateLimitMap) {
+      if (now > v.resetAt) rateLimitMap.delete(k);
+    }
+  }
+  return true;
+}
+
+/**
+ * 从请求中提取客户端真实 IP
+ * @param {http.IncomingMessage} req
+ * @returns {string}
+ */
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+    || req.headers['x-real-ip']
+    || req.socket?.remoteAddress
+    || 'unknown';
+}
+
 const server = http.createServer((req, res) => {
+  const ip = getClientIp(req);
+  const isWrite = ['POST', 'PUT', 'DELETE'].includes(req.method);
+  // 静态资源 GET 和写操作都限流
+  if (!checkRateLimit(ip, isWrite)) {
+    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '1' });
+    res.end(JSON.stringify({ error: 'rate limit exceeded' }));
+    return;
+  }
   if (serveMemoryApi(req, res)) return;
+  if (serveMemoryFilesList(req, res)) return;
+  if (serveMemoryFileRead(req, res)) return;
+  if (serveMemoryFileWrite(req, res)) return;
+  if (serveMemoryFileDelete(req, res)) return;
   if (serveCostConfigApi(req, res)) return;
   if (serveCostHistoryApi(req, res)) return;
   if (serveCallStatsApi(req, res)) return;

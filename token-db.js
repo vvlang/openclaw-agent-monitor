@@ -129,8 +129,6 @@ function getStatsByVendorModel() {
  * @returns {{ imported: number, models: number }}
  */
 function importFromTokenCumulativeState(stateFilePath) {
-  const path = require('path');
-  const fs = require('fs');
   const target = stateFilePath || path.join(__dirname, 'token-cumulative-state.json');
   let raw;
   try {
@@ -179,8 +177,7 @@ function getStatsByDay(limitDays) {
   // 读取费用配置（通过父模块读取；这里直接读 JSON 文件）
   let costConfig = {};
   try {
-    const fs = require('fs');
-    const cfgPath = require('path').join(__dirname, 'model-pricing.json');
+    const cfgPath = path.join(__dirname, 'model-pricing.json');
     const raw = fs.readFileSync(cfgPath, 'utf-8');
     const parsed = JSON.parse(raw);
     costConfig = parsed && parsed.models ? parsed.models : {};
