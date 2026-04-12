@@ -28,6 +28,19 @@ function extractJsonObject(raw) {
 }
 const tokenDb = require('./token-db');
 
+/**
+ * 将 agent.model 规范化为字符串。
+ * OpenClaw status --json 中 model 可能是 string 或 { primary, fallbacks } 对象。
+ * @param {string|object|null} model
+ * @returns {string} 非空字符串，或 ''（后续调用方会转为 'unknown'）
+ */
+function modelToString(model) {
+  if (!model) return '';
+  if (typeof model === 'string') return model.trim();
+  if (typeof model === 'object' && model !== null && typeof model.primary === 'string') return model.primary.trim();
+  return '';
+}
+
 /** Gateway 直连探测超时（毫秒），当 status 报离线时用此探测修正 */
 const GATEWAY_PROBE_TIMEOUT_MS = 3000;
 /** Gateway 探测结果缓存时间（毫秒），此时间内不重复探测，避免在线/离线来回跳 */
@@ -1379,13 +1392,27 @@ async function updateStatus() {
   } catch (e) {
     console.warn('[writer] 读取 token-cumulative-state 失败:', e.message || e);
   }
+
+  // 启动时一次性把 tokenState.byModel 导入 SQLite 基线表，确保 Dashboard 的 vendor/model 统计
+  // 即时反映出历史累计（后续增量 on top）。
+  // importFromTokenCumulativeState 会先 DELETE 基线表再插入，避免重复计算。
+  if (Object.keys(tokenState.byModel || {}).length > 0) {
+    try {
+      tokenDb.init();
+      const result = tokenDb.importFromTokenCumulativeState(TOKEN_CUMULATIVE_STATE_FILE);
+      console.log('[writer] SQLite 基线导入完成: ' + result.models + ' 个模型, ' + result.imported.toLocaleString() + ' tokens');
+    } catch (e) {
+      console.warn('[writer] SQLite 基线导入失败:', e.message || e);
+    }
+  }
+
   const cumulativeByAgent = {};
   let tokenCumulativeGlobal = 0;
   const statusAvailable = !!status;
   agents.forEach((a) => {
     const sessionId = a.lastSessionId || null;
     const totalTokens = a.totalTokens != null ? Number(a.totalTokens) : 0;
-    const modelId = (a.model && typeof a.model === 'string' ? a.model.trim() : '') || 'unknown';
+    const modelId = modelToString(a.model) || 'unknown';
     let rec = tokenState.byAgent[a.id];
     if (!rec) rec = { cumulativeTokens: 0, lastSessionId: null, lastTotalTokens: 0, lastModelId: null };
     if (rec.lastModelId == null) rec.lastModelId = null;
@@ -1442,7 +1469,7 @@ async function updateStatus() {
   // 按模型（modelId）汇总当前与累计 Token：当前 = 各 Agent 当前会话归属到其当前模型；累计 = 按会话归属到当时使用的模型
   const tokenByModelMap = {};
   agents.forEach((a) => {
-    const modelId = (a.model && typeof a.model === 'string' ? a.model.trim() : '') || 'unknown';
+    const modelId = modelToString(a.model) || 'unknown';
     if (!tokenByModelMap[modelId]) tokenByModelMap[modelId] = { modelId, current: 0, cumulative: tokenState.byModel[modelId] || 0 };
     const cur = a.totalTokens != null ? Number(a.totalTokens) : 0;
     tokenByModelMap[modelId].current += cur;
@@ -1581,15 +1608,42 @@ async function updateStatus() {
     system,
     memoryGlobal: MEMORY_ENABLED ? (prevData && Array.isArray(prevData.memoryGlobal) ? prevData.memoryGlobal : []) : null,
     tokenCumulative: (() => {
-      // SQLite 是各 Agent Token 累计的权威数据源（包含历史导入 + 增量记录）
+      // 优先取 SQLite（包含历史导入 + 增量记录）；DB 为空时用内存中已计算的值兜底
       const dbByAgent = {};
       let dbGlobal = 0;
-      try { tokenDb.init(); tokenDb.getStatsByAgent().forEach(({ agentId, total }) => { dbByAgent[agentId] = total; dbGlobal += total; }); } catch (_) {}
+      let dbHasData = false;
+      try {
+        tokenDb.init();
+        const rows = tokenDb.getStatsByAgent();
+        rows.forEach(({ agentId, total }) => { dbByAgent[agentId] = total; dbGlobal += total; });
+        dbHasData = rows.length > 0;
+      } catch (_) {}
+      // DB 为空时用内存中本轮计算的 cumulativeByAgent 和 tokenCumulativeGlobal 兜底
+      if (!dbHasData) {
+        return { byAgent: cumulativeByAgent, global: tokenCumulativeGlobal };
+      }
       return { byAgent: dbByAgent, global: dbGlobal };
     })(),
     tokenByModel,
-    tokenByVendor,
-    tokenByVendorModel,
+    tokenByVendor: (() => {
+      // DB 为空时，从内存 tokenState.byModel 按 vendor 聚合
+      if (tokenByVendor && tokenByVendor.length > 0) return tokenByVendor;
+      const byVendor = {};
+      Object.entries(tokenState.byModel || {}).forEach(([modelId, tokens]) => {
+        if (!tokens) return;
+        const vendor = tokenDb.extractVendor(modelId);
+        byVendor[vendor] = (byVendor[vendor] || 0) + tokens;
+      });
+      return Object.entries(byVendor).sort((a, b) => b[1] - a[1]).map(([vendor, total]) => ({ vendor, total }));
+    })(),
+    tokenByVendorModel: (() => {
+      // DB 为空时，从内存 tokenState.byModel 按 (vendor, model) 聚合
+      if (tokenByVendorModel && tokenByVendorModel.length > 0) return tokenByVendorModel;
+      return Object.entries(tokenState.byModel || {}).filter(([, tokens]) => tokens > 0).map(([modelId, total]) => {
+        const vendor = tokenDb.extractVendor(modelId);
+        return { vendor, modelId, total };
+      }).sort((a, b) => b.total - a.total);
+    })(),
     modelsSummary: getModelsSummaryFromConfig(),
     pluginsSummary: getPluginsSummaryFromConfig(),
   };
@@ -2183,6 +2237,44 @@ function serveCostHistoryApi(req, res) {
   return true;
 }
 
+/** OpenClaw 用量统计 API：GET /usage-cost
+ *  返回 OpenClaw 原生 session-cost-usage 追踪的每日用量数据。
+ *  来自 openclaw gateway usage-cost --json（按天聚合 input/output/cache tokens）。
+ */
+function serveUsageCostApi(req, res) {
+  let parsed;
+  try { parsed = new URL(req.url, 'http://localhost'); } catch (_) { return false; }
+  if (parsed.pathname !== '/usage-cost') return false;
+  const days = parseInt(parsed.searchParams.get('days') || '30', 10);
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const child = spawn('openclaw', ['gateway', 'usage-cost', '--days', String(days), '--json'], {
+    timeout: 15000,
+    env: { ...process.env, NO_COLOR: '1' },
+  });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', d => stdout += d);
+  child.stderr.on('data', d => stderr += d);
+  child.on('close', code => {
+    if (code === 0 && stdout.trim()) {
+      try {
+        res.end(stdout.trim());
+      } catch (_) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'parse error' }));
+      }
+    } else {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: stderr.trim() || 'gateway usage-cost failed, code: ' + code }));
+    }
+  });
+  child.on('error', e => {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message || String(e) }));
+  });
+  return true;
+}
+
 /** 调用统计 API：GET /call-stats
  *  返回按供应商·模型的调用次数统计和每5小时窗口历史（来自增量日志）。
  *  返回结构：{ byVendorModel, totalCalls, history: { stats, todayTotal } }
@@ -2270,6 +2362,7 @@ const server = http.createServer((req, res) => {
   if (serveCostConfigApi(req, res)) return;
   if (serveCostHistoryApi(req, res)) return;
   if (serveCallStatsApi(req, res)) return;
+  if (serveUsageCostApi(req, res)) return;
   serveStatic(req, res);
 });
 

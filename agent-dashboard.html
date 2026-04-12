@@ -184,20 +184,12 @@
             </div>
 
             <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
-                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按供应商·模型，数据库）</h2>
-                <p class="text-[10px] text-slate-500 mb-2">本地 SQLite 按次写入的准确统计；供应商为 model_id 首段（如 nvidia、anthropic）。</p>
-                <div id="token-by-vendor" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 mb-2">
+                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按天，OpenClaw 原生）</h2>
+                <p class="text-[10px] text-slate-500 mb-2">来自 openclaw gateway usage-cost，按天聚合全部 Agent 的 session 实际用量（input / output / cache）。</p>
+                <div id="usage-cost" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400 mb-2">
                     <div class="text-slate-600 italic">等待数据...</div>
                 </div>
-                <div id="token-by-vendor-model" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
-                    <div class="text-slate-600 italic">等待数据...</div>
-                </div>
-            </div>
-
-            <div class="mt-4 pt-4 border-t border-slate-700 shrink-0">
-                <h2 class="text-xs md:text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">大模型用量（按模型，JSON 累计）</h2>
-                <p class="text-[10px] text-slate-500 mb-2">累计按会话归属到当时使用的模型；预估成本按「成本设置」单价（输入/输出未区分，均价估算）。</p>
-                <div id="token-by-model" class="rounded border border-slate-700/50 bg-slate-800/30 p-2 font-mono text-[10px] text-slate-400">
+                <div id="usage-cost-daily" class="space-y-1 font-mono text-[10px] text-slate-400 max-h-40 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic">等待数据...</div>
                 </div>
             </div>
@@ -225,6 +217,36 @@
                 <div id="memory-log" class="text-[10px] text-slate-500 font-mono mb-1 min-h-[1.5rem]">—</div>
                 <div id="memory-content" class="space-y-4 max-h-64 md:max-h-80 overflow-y-auto scroll-touch">
                     <div class="text-slate-600 italic text-xs">点击各角色卡片下的「读取记忆」或上方「读取全局记忆」加载记忆</div>
+                </div>
+
+                <!-- 记忆文件编辑区 -->
+                <div class="mt-3 pt-3 border-t border-slate-700/60">
+                    <div class="flex flex-wrap gap-2 items-center mb-2">
+                        <span class="text-[10px] text-slate-500 font-mono">记忆文件:</span>
+                        <select id="mem-file-agent" class="bg-slate-800 border border-slate-600 rounded px-1.5 text-[10px] text-slate-300">
+                            <option value="">— 选择 Agent —</option>
+                        </select>
+                        <select id="mem-file-category" class="bg-slate-800 border border-slate-600 rounded px-1.5 text-[10px] text-slate-300">
+                            <option value="memory">memory/</option>
+                            <option value="core">core/</option>
+                            <option value="archive">archive/</option>
+                        </select>
+                        <select id="mem-file-select" class="flex-1 min-w-[80px] bg-slate-800 border border-slate-600 rounded px-1.5 text-[10px] text-slate-300">
+                            <option value="">— 选择文件 —</option>
+                        </select>
+                        <button type="button" id="mem-file-new" class="tap-target text-[10px] px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300">新建</button>
+                        <button type="button" id="mem-file-save" class="tap-target text-[10px] px-2 py-1 rounded bg-emerald-800 hover:bg-emerald-700 text-slate-200 disabled:opacity-40" disabled>保存</button>
+                        <button type="button" id="mem-file-delete" class="tap-target text-[10px] px-2 py-1 rounded bg-red-900/50 hover:bg-red-800 text-red-300 disabled:opacity-40" disabled>删除</button>
+                    </div>
+                    <div id="mem-file-log" class="text-[10px] text-slate-500 font-mono mb-1 min-h-[1rem]">—</div>
+                    <textarea id="mem-file-editor" class="w-full h-40 bg-slate-800 border border-slate-600 rounded p-2 text-[10px] text-slate-300 font-mono resize-y" placeholder="选择文件或点击「新建」开始编辑..." style="display:none;"></textarea>
+                    <div id="mem-file-preview" class="hidden w-full h-40 bg-slate-800/50 border border-slate-600 rounded p-2 text-[10px] text-slate-300 overflow-y-auto scroll-touch"></div>
+                    <div class="mt-1">
+                        <label class="text-[10px] text-slate-500 flex items-center gap-1">
+                            <input type="checkbox" id="mem-file-preview-toggle" class="accent-amber-500" />
+                            预览
+                        </label>
+                    </div>
                 </div>
             </div>
 
@@ -306,7 +328,7 @@
                 agent.sessionCount,
                 agent.cumulativeTokens,
                 agent.color,
-                (agent.model || '').trim(),
+                getAgentModel(agent),
                 JSON.stringify((agent.boundChannels || []).slice().sort()),
             ].join('|');
         }
@@ -535,6 +557,69 @@
                     '<td class="py-1 text-right text-emerald-400">' + formatCost(cs.totalEstimatedCost) + '</td></tr>';
             }
             el.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left"><th class="py-0.5 pr-2">模型</th><th class="py-0.5 pr-2 text-right">当前</th><th class="py-0.5 pr-2 text-right">累计</th><th class="py-0.5 text-right">预估成本</th></tr></thead><tbody>' + rows + totalLine + '</tbody></table>';
+        }
+
+        function renderUsageCost() {
+            var el = document.getElementById('usage-cost');
+            var dailyEl = document.getElementById('usage-cost-daily');
+            if (!el && !dailyEl) return;
+
+            fetch('usage-cost?days=30')
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(data) {
+                    if (!data) {
+                        if (el) el.innerHTML = '<div class="text-slate-600 italic">暂无用量数据</div>';
+                        return;
+                    }
+
+                    // data shape: { daily: [{ date, input, output, cacheRead, cacheWrite, totalTokens, totalCost }] }
+                    var days = data.daily || [];
+                    var totalTokens = 0, totalInput = 0, totalOutput = 0, totalCacheR = 0, totalCacheW = 0;
+                    days.forEach(function(d) {
+                        totalTokens += d.totalTokens || 0;
+                        totalInput += d.input || 0;
+                        totalOutput += d.output || 0;
+                        totalCacheR += d.cacheRead || 0;
+                        totalCacheW += d.cacheWrite || 0;
+                    });
+
+                    if (el) {
+                        el.innerHTML =
+                            '<div class="grid grid-cols-5 gap-1">' +
+                            '<div><div class="text-slate-500">合计</div><div class="text-cyan-400 font-bold">' + totalTokens.toLocaleString() + '</div></div>' +
+                            '<div><div class="text-slate-500">Input</div><div class="text-slate-300">' + totalInput.toLocaleString() + '</div></div>' +
+                            '<div><div class="text-slate-500">Output</div><div class="text-slate-300">' + totalOutput.toLocaleString() + '</div></div>' +
+                            '<div><div class="text-slate-500">Cache Read</div><div class="text-slate-300">' + totalCacheR.toLocaleString() + '</div></div>' +
+                            '<div><div class="text-slate-500">Cache Write</div><div class="text-slate-300">' + totalCacheW.toLocaleString() + '</div></div>' +
+                            '</div>';
+                    }
+
+                    if (dailyEl) {
+                        if (days.length === 0) {
+                            dailyEl.innerHTML = '<div class="text-slate-600 italic">暂无日用量数据</div>';
+                        } else {
+                            var rows = days.slice().reverse().map(function(d) {
+                                return '<tr class="border-b border-slate-700/50">' +
+                                    '<td class="py-0.5 pr-3 text-slate-400">' + d.date + '</td>' +
+                                    '<td class="py-0.5 pr-3 text-right text-cyan-400/80">' + (d.totalTokens || 0).toLocaleString() + '</td>' +
+                                    '<td class="py-0.5 pr-3 text-right text-slate-500">' + (d.input || 0).toLocaleString() + '</td>' +
+                                    '<td class="py-0.5 pr-3 text-right text-slate-500">' + (d.output || 0).toLocaleString() + '</td>' +
+                                    '<td class="py-0.5 pr-3 text-right text-slate-500">' + (d.cacheRead || 0).toLocaleString() + '</td>' +
+                                    '<td class="py-0.5 text-right text-slate-500">' + (d.cacheWrite || 0).toLocaleString() + '</td>' +
+                                    '</tr>';
+                            }).join('');
+                            dailyEl.innerHTML = '<table class="w-full"><thead><tr class="text-slate-500 text-left">' +
+                                '<th class="py-0.5 pr-3">日期</th><th class="py-0.5 pr-3 text-right">Total</th>' +
+                                '<th class="py-0.5 pr-3 text-right">Input</th><th class="py-0.5 pr-3 text-right">Output</th>' +
+                                '<th class="py-0.5 pr-3 text-right">CacheRd</th><th class="py-0.5 text-right">CacheWr</th>' +
+                                '</tr></thead><tbody>' + rows + '</tbody></table>';
+                        }
+                    }
+                })
+                .catch(function() {
+                    if (el) el.innerHTML = '<div class="text-slate-600 italic">加载失败</div>';
+                    if (dailyEl) dailyEl.innerHTML = '<div class="text-slate-600 italic">加载失败</div>';
+                });
         }
 
         function renderCallStats() {
@@ -844,6 +929,369 @@
             });
         })();
 
+        // ---------------------------------------------------------------------------
+        // 记忆文件编辑
+        // ---------------------------------------------------------------------------
+        var memFileState = { agentId: null, category: 'memory', path: null, dirty: false, _reqSeq: 0 };
+
+        function setMemFileLog(msg, isErr) {
+            var el = document.getElementById('mem-file-log');
+            if (el) {
+                el.textContent = msg;
+                el.className = 'text-[10px] font-mono mb-1 min-h-[1rem]' + (isErr ? ' text-red-400' : ' text-slate-500');
+            }
+        }
+
+        // 提取重复的 fetch 错误处理
+        function fetchJson(r) {
+            if (r.ok) return Promise.resolve(r.json());
+            return r.clone().text().then(function(txt) {
+                var errMsg = txt;
+                try { errMsg = JSON.parse(txt).error || txt; } catch (_) {}
+                throw new Error(errMsg || r.statusText);
+            });
+        }
+
+        function refreshAgentSelect() {
+            var sel = document.getElementById('mem-file-agent');
+            if (!sel) return;
+            var current = sel.value;
+            var ids = Object.keys(agentCardCache).sort();
+            var key = ids.join(',');
+            if (key === memFileState._lastAgentKey) return;
+            memFileState._lastAgentKey = key;
+            sel.innerHTML = '<option value="">— 选择 Agent —</option>';
+            ids.forEach(function(id) {
+                var card = agentCardCache[id];
+                var name = card && card._agentName ? card._agentName : id;
+                var opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = name;
+                sel.appendChild(opt);
+            });
+            sel.value = current && Object.keys(agentCardCache).includes(current) ? current : '';
+        }
+
+        function loadMemoryFiles() {
+            var sel = document.getElementById('mem-file-select');
+            var agentId = document.getElementById('mem-file-agent').value;
+            var category = document.getElementById('mem-file-category').value;
+            sel.innerHTML = '<option value="">加载中…</option>';
+            setMemFileLog('加载文件列表…');
+            memFileState.agentId = agentId || null;
+            memFileState.category = category;
+            memFileState.path = null;
+            memFileState.dirty = false;
+            document.getElementById('mem-file-editor').style.display = 'none';
+            document.getElementById('mem-file-preview').classList.add('hidden');
+            document.getElementById('mem-file-preview-toggle').checked = false;
+            document.getElementById('mem-file-save').disabled = true;
+            document.getElementById('mem-file-delete').disabled = true;
+            document.getElementById('mem-file-editor').value = '';
+
+            var reqSeq = ++memFileState._reqSeq;
+            if (memFileState._loadController) memFileState._loadController.abort();
+            memFileState._loadController = new AbortController();
+            var signal = memFileState._loadController.signal;
+            var url = 'memory-files?category=' + encodeURIComponent(category);
+            if (agentId) url += '&agentId=' + encodeURIComponent(agentId);
+            fetch(url, { signal: signal })
+                .then(fetchJson)
+                .then(function(data) {
+                    if (reqSeq !== memFileState._reqSeq) return;
+                    sel.innerHTML = '<option value="">— 选择文件 —</option>';
+                    if (!data.files || data.files.length === 0) {
+                        sel.innerHTML += '<option value="" disabled>（无文件）</option>';
+                    }
+                    (data.files || []).forEach(function(f) {
+                        var opt = document.createElement('option');
+                        opt.value = f;
+                        opt.textContent = f;
+                        sel.appendChild(opt);
+                    });
+                    setMemFileLog(data.files ? data.files.length + ' 个文件' : '（无文件）');
+                })
+                .catch(function(e) {
+                    if (reqSeq !== memFileState._reqSeq) return;
+                    if (e.name === 'AbortError') return;
+                    sel.innerHTML = '<option value="">加载失败</option>';
+                    setMemFileLog('加载失败: ' + (e.message || e), true);
+                });
+        }
+
+        function selectMemoryFile(path) {
+            var editor = document.getElementById('mem-file-editor');
+            var preview = document.getElementById('mem-file-preview');
+            var previewToggle = document.getElementById('mem-file-preview-toggle');
+            if (!path) {
+                memFileState.path = null;
+                memFileState.dirty = false;
+                editor.style.display = 'none';
+                preview.classList.add('hidden');
+                editor.value = '';
+                document.getElementById('mem-file-save').disabled = true;
+                document.getElementById('mem-file-delete').disabled = true;
+                return;
+            }
+            setMemFileLog('读取 ' + path + ' …');
+            var reqSeq = ++memFileState._reqSeq;
+            if (memFileState._selectController) memFileState._selectController.abort();
+            memFileState._selectController = new AbortController();
+            var signal = memFileState._selectController.signal;
+            var url = 'memory-file?path=' + encodeURIComponent(path) + '&category=' + encodeURIComponent(memFileState.category);
+            if (memFileState.agentId) url += '&agentId=' + encodeURIComponent(memFileState.agentId);
+            fetch(url, { signal: signal })
+                .then(fetchJson)
+                .then(function(data) {
+                    if (reqSeq !== memFileState._reqSeq) return;
+                    memFileState.path = path;
+                    memFileState.dirty = false;
+                    editor.value = data.content || '';
+                    editor.style.display = 'block';
+                    preview.classList.add('hidden');
+                    previewToggle.checked = false;
+                    document.getElementById('mem-file-save').disabled = false;
+                    document.getElementById('mem-file-delete').disabled = false;
+                    setMemFileLog('已加载: ' + path);
+                    updatePreview();
+                })
+                .catch(function(e) {
+                    if (reqSeq !== memFileState._reqSeq) return;
+                    if (e.name === 'AbortError') return;
+                    setMemFileLog('读取失败: ' + (e.message || e), true);
+                });
+        }
+
+        // 纯 DOM 方式构建预览，零 innerHTML，全程 textContent 防止 XSS
+        function updatePreview() {
+            var editor = document.getElementById('mem-file-editor');
+            var preview = document.getElementById('mem-file-preview');
+            var previewToggle = document.getElementById('mem-file-preview-toggle');
+            if (previewToggle.checked) {
+                preview.innerHTML = '';
+                var lines = editor.value.split('\n');
+                lines.forEach(function(line) {
+                    var el, match;
+                    if ((match = line.match(/^### (.*)/))) {
+                        el = document.createElement('h3'); el.className = 'text-slate-200 font-bold mt-1';
+                    } else if ((match = line.match(/^## (.*)/))) {
+                        el = document.createElement('h2'); el.className = 'text-slate-200 font-bold mt-1';
+                    } else if ((match = line.match(/^# (.*)/))) {
+                        el = document.createElement('h1'); el.className = 'text-slate-100 font-bold mt-1';
+                    } else if ((match = line.match(/^- (.*)/))) {
+                        el = document.createElement('li'); el.className = 'text-slate-300 ml-3';
+                    }
+                    if (el) {
+                        el.textContent = match[1];
+                        preview.appendChild(el);
+                    } else {
+                        // 纯 DOM：textContent 安全处理原文，再对 **bold** 和 `code` 用 createElement 建安全子节点
+                        appendSafeLine(preview, line);
+                    }
+                    preview.appendChild(document.createElement('br'));
+                });
+                preview.classList.remove('hidden');
+                editor.style.display = 'none';
+            } else {
+                preview.classList.add('hidden');
+                editor.style.display = 'block';
+            }
+        }
+
+        // 对普通文本行，将 **bold** 和 `code` 片段安全注入为子节点，不使用 innerHTML
+        function appendSafeLine(container, rawLine) {
+            var fragment = document.createDocumentFragment();
+            var parts = tokenizeLine(rawLine); // [{ type: 'text', value }, { type: 'bold', value }, { type: 'code', value }]
+            parts.forEach(function(part) {
+                if (part.type === 'bold') {
+                    var strong = document.createElement('strong');
+                    strong.className = 'text-slate-100';
+                    strong.textContent = part.value;
+                    fragment.appendChild(strong);
+                } else if (part.type === 'code') {
+                    var code = document.createElement('code');
+                    code.className = 'bg-slate-700 px-1 rounded text-amber-300';
+                    code.textContent = part.value;
+                    fragment.appendChild(code);
+                } else {
+                    // 'text' — textContent 天然防 XSS
+                    fragment.appendChild(document.createTextNode(part.value));
+                }
+            });
+            var span = document.createElement('span');
+            span.className = 'text-slate-300';
+            span.appendChild(fragment);
+            container.appendChild(span);
+        }
+
+        // 逐字符扫描 Markdown 行，识别 **bold** 和 `code` 片段，返回 token 数组
+        function tokenizeLine(line) {
+            var tokens = [];
+            var i = 0, len = line.length;
+            while (i < len) {
+                if (line[i] === '`' && line[i + 1] !== '`') {
+                    var j = i + 1;
+                    while (j < len && line[j] !== '`') j++;
+                    tokens.push({ type: 'code', value: line.slice(i + 1, j) });
+                    i = j + 1 < len ? j + 1 : j;
+                } else if (line[i] === '*' && line[i + 1] === '*') {
+                    var k = i + 2;
+                    while (k < len - 1 && !(line[k] === '*' && line[k + 1] === '*')) k++;
+                    if (k < len - 1) {
+                        tokens.push({ type: 'bold', value: line.slice(i + 2, k) });
+                        i = k + 2;
+                    } else {
+                        tokens.push({ type: 'text', value: line[i] });
+                        i++;
+                    }
+                } else {
+                    // 收集连续普通字符
+                    var m = i;
+                    while (m < len && line[m] !== '`' && !(line[m] === '*' && line[m + 1] === '*')) m++;
+                    if (m > i) {
+                        tokens.push({ type: 'text', value: line.slice(i, m) });
+                        i = m;
+                    } else {
+                        tokens.push({ type: 'text', value: line[i] });
+                        i++;
+                    }
+                }
+            }
+            return tokens;
+        }
+
+        function saveMemoryFile() {
+            if (!memFileState.path || !memFileState.dirty) return;
+            var editor = document.getElementById('mem-file-editor');
+            var payload = {
+                path: memFileState.path,
+                content: editor.value,
+                agentId: memFileState.agentId,
+                category: memFileState.category,
+            };
+            setMemFileLog('保存中…');
+            fetch('memory-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+                .then(fetchJson)
+                .then(function() {
+                    memFileState.dirty = false;
+                    setMemFileLog('已保存: ' + memFileState.path);
+                })
+                .catch(function(e) {
+                    setMemFileLog('保存失败: ' + (e.message || e), true);
+                });
+        }
+
+        function deleteMemoryFile() {
+            if (!memFileState.path) return;
+            if (!confirm('删除文件 "' + memFileState.path + '"？此操作不可撤销。')) return;
+            var url = 'memory-file?path=' + encodeURIComponent(memFileState.path) + '&category=' + encodeURIComponent(memFileState.category);
+            if (memFileState.agentId) url += '&agentId=' + encodeURIComponent(memFileState.agentId);
+            setMemFileLog('删除中…');
+            fetch(url, { method: 'DELETE' })
+                .then(fetchJson)
+                .then(function() {
+                    setMemFileLog('已删除: ' + memFileState.path);
+                    memFileState.path = null;
+                    document.getElementById('mem-file-editor').style.display = 'none';
+                    document.getElementById('mem-file-save').disabled = true;
+                    document.getElementById('mem-file-delete').disabled = true;
+                    document.getElementById('mem-file-editor').value = '';
+                    loadMemoryFiles();
+                })
+                .catch(function(e) {
+                    setMemFileLog('删除失败: ' + (e.message || e), true);
+                });
+        }
+
+        (function initMemFileEditor() {
+            // 未保存变化时警告
+            window.addEventListener('beforeunload', function(e) {
+                if (memFileState.dirty) {
+                    e.preventDefault();
+                    e.returnValue = '';
+                }
+            });
+
+            // Agent 下拉变化时重新加载文件列表
+            document.getElementById('mem-file-agent').addEventListener('change', function() {
+                memFileState.agentId = this.value || null;
+                memFileState.path = null;
+                memFileState.dirty = false;
+                document.getElementById('mem-file-editor').style.display = 'none';
+                document.getElementById('mem-file-save').disabled = true;
+                document.getElementById('mem-file-delete').disabled = true;
+                document.getElementById('mem-file-editor').value = '';
+                loadMemoryFiles();
+            });
+
+            // Category 变化时重新加载文件列表
+            document.getElementById('mem-file-category').addEventListener('change', function() {
+                memFileState.category = this.value;
+                memFileState.path = null;
+                loadMemoryFiles();
+            });
+
+            // 文件选择变化时加载内容
+            document.getElementById('mem-file-select').addEventListener('change', function() {
+                selectMemoryFile(this.value);
+            });
+
+            // 新建文件
+            document.getElementById('mem-file-new').addEventListener('click', function() {
+                var name = prompt('新建文件名（不含路径，直接写文件名即可）：', '');
+                if (!name) return;
+                name = name.trim();
+                if (!name) return;
+                // 防止路径遍历和非法字符
+                if (/[\\/.*?|<>\x00-\x1f]/.test(name)) {
+                    alert('文件名不能包含 \\ / . * ? | < > 及控制字符');
+                    return;
+                }
+                if (name === '.' || name === '..' || name.includes('..')) {
+                    alert('非法文件名');
+                    return;
+                }
+                if (!name.endsWith('.md')) name += '.md';
+                memFileState.path = name;
+                memFileState.dirty = true;
+                var editor = document.getElementById('mem-file-editor');
+                editor.value = '# ' + name.replace(/\.md$/, '') + '\n\n';
+                editor.style.display = 'block';
+                document.getElementById('mem-file-preview').classList.add('hidden');
+                document.getElementById('mem-file-preview-toggle').checked = false;
+                document.getElementById('mem-file-save').disabled = false;
+                document.getElementById('mem-file-delete').disabled = true;
+                setMemFileLog('新建文件: ' + name);
+            });
+
+            // 保存
+            document.getElementById('mem-file-save').addEventListener('click', saveMemoryFile);
+
+            // 删除
+            document.getElementById('mem-file-delete').addEventListener('click', deleteMemoryFile);
+
+            // 预览切换
+            document.getElementById('mem-file-preview-toggle').addEventListener('change', updatePreview);
+
+            // 编辑器内容变化标记 dirty
+            document.getElementById('mem-file-editor').addEventListener('input', function() {
+                memFileState.dirty = true;
+            });
+        })();
+
+        // 兼容 agent.model 为字符串或对象（{ primary, fallbacks }）的情况
+        function getAgentModel(agent) {
+            var m = agent.model;
+            if (!m) return '';
+            if (typeof m === 'string') return m.trim();
+            if (typeof m === 'object' && m.primary) return m.primary;
+            return '';
+        }
+
         function renderAgents(data) {
             var agents = data.agents || [];
             if (agents.length === 0) {
@@ -895,11 +1343,12 @@
                         // 数据变化或首次渲染，创建新卡片
                         card = document.createElement('div');
                         card.className = 'agent-card rounded-xl p-2.5 flex flex-col relative' + (isThinking ? ' thinking' : '');
-                    var modelName = (agent.model && agent.model.trim()) ? (agent.model.indexOf('/') >= 0 ? agent.model.split('/').pop() : agent.model) : '';
+                    var modelStr = getAgentModel(agent);
+                    var modelName = modelStr && modelStr.indexOf('/') >= 0 ? modelStr.split('/').pop() : modelStr;
                     var modelDisplay = modelName ? escapeHtml(modelName) : '';
                     var modelPart = modelDisplay;
                     if (modelPart && modelHealthList.length > 0 && agent.model) {
-                        var avail = modelAvailable[agent.model];
+                        var avail = modelAvailable[modelStr];
                         if (avail === true) modelPart = '<span class="text-green-400" title="模型可用">●</span> ' + modelPart;
                         else if (avail === false) modelPart = '<span class="text-red-400" title="模型不可用">●</span> ' + modelPart;
                     }
@@ -937,7 +1386,7 @@
                         '<div class="text-xs font-bold text-white truncate min-w-0" title="' + escapeHtml(agent.name || agent.id || '') + '">' + escapeHtml(agent.name || agent.id || '未知') + '</div>' +
                         '</div>' +
                         '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center">' + escapeHtml(agent.id) + '</div>' +
-                        (metaLine ? '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center" title="' + escapeHtml(agent.model || '') + '">' + metaLine + '</div>' : '') +
+                        (metaLine ? '<div class="text-[9px] text-slate-500 font-mono truncate w-full text-center" title="' + escapeHtml(modelStr) + '">' + metaLine + '</div>' : '') +
                         (channelTags ? '<div class="flex flex-wrap gap-0.5 justify-center">' + channelTags + '</div>' : '') +
                         '<div class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">' + getStatusText(agent.status) + '</div>' +
                         subagentBadge +
@@ -949,6 +1398,7 @@
                         '</div>';
                         // 记录指纹并缓存
                         card._fp = fp;
+                        card._agentName = agent.name || agent.id;
                         agentCardCache[agent.id] = card;
                     }
                     cardsContainer.appendChild(card);
@@ -971,9 +1421,8 @@
 
             renderGateway(data);
             renderTokenStats(data);
-            renderTokenByVendorAndModel(data);
-            renderTokenByModel(data);
             renderCallStats(data);
+            renderUsageCost();
             renderModelsSummary(data);
             renderPluginsSummary(data);
             renderRecentSessions(data);
@@ -1003,6 +1452,7 @@
                 if (!response.ok) throw new Error('No data');
                 var data = await response.json();
                 renderAgents(data);
+                refreshAgentSelect();
 
                 (data.agents || []).forEach(function (agent) {
                     var prev = previousState[agent.id];
@@ -1015,6 +1465,7 @@
                     previousState[agent.id] = agent.status;
                 });
             } catch (e) {
+                console.error('[fetchData]', e && e.message ? e.message : String(e));
                 globalStatus.textContent = '未连接';
                 globalStatus.className = 'text-xs font-mono text-red-400';
                 gatewayBadge.textContent = '--';

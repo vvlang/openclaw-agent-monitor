@@ -4,6 +4,7 @@
  */
 
 const Database = require('better-sqlite3');
+const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_DB_PATH = path.join(__dirname, 'token-usage.db');
